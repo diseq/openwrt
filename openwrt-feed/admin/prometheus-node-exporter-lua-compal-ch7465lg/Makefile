@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=prometheus-node-exporter-lua-compal-ch7465lg
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 
 PKG_LICENSE:=MIT
 PKGARCH:=all
@@ -16,7 +16,7 @@ define Package/prometheus-node-exporter-lua-compal-ch7465lg
   CATEGORY:=Administration
   TITLE:=Compal CH7465LG / ConnectBox Prometheus Lua collector
   URL:=https://github.com/mbugert/connectbox-prometheus
-  DEPENDS:=+prometheus-node-exporter-lua +luasocket +libuci-lua
+  DEPENDS:=+prometheus-node-exporter-lua +luasocket +libuci-lua +openssl-util
 endef
 
 define Package/prometheus-node-exporter-lua-compal-ch7465lg/description
