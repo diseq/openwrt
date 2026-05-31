@@ -275,6 +275,15 @@ local rshift = bit.rshift
 local lshift = bit.lshift
 local tobit = bit.tobit or function(x) return band(x, 0xffffffff) end
 local TWO32 = 4294967296
+local HEX_DIGITS = "0123456789abcdef"
+
+local function byte_to_hex(byte)
+  byte = math.floor(tonumber(byte) or 0) % 256
+  local hi = math.floor(byte / 16) + 1
+  local lo = (byte % 16) + 1
+  return HEX_DIGITS:sub(hi, hi) .. HEX_DIGITS:sub(lo, lo)
+end
+
 
 local function unsigned(x)
   x = tonumber(x) or 0
@@ -311,7 +320,11 @@ local SHA256_K = {
 }
 
 local function hex32(x)
-  return string.format("%08x", math.floor(unsigned(x)))
+  x = unsigned(x)
+  return byte_to_hex(math.floor(x / 16777216))
+      .. byte_to_hex(math.floor(x / 65536))
+      .. byte_to_hex(math.floor(x / 256))
+      .. byte_to_hex(x)
 end
 
 local function sha256_hex(msg)
@@ -428,7 +441,7 @@ end
 
 local function bytes_to_hex(bytes)
   return (tostring(bytes or ""):gsub(".", function(byte)
-    return string.format("%02x", string.byte(byte))
+    return byte_to_hex(string.byte(byte))
   end))
 end
 
