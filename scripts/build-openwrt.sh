@@ -10,7 +10,7 @@ REPO_ROOT="$(cd "$script_dir/.." && pwd -P)"
 
 CUSTOM_FEED_NAME="${CUSTOM_FEED_NAME:-fluentbit}"
 CUSTOM_FEED_DIR="${CUSTOM_FEED_DIR:-${REPO_ROOT}/openwrt-feed}"
-OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
+OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
 
 if [[ ! -d "$CUSTOM_FEED_DIR" ]]; then
   echo "error: custom feed dir not found: $CUSTOM_FEED_DIR" >&2
@@ -25,7 +25,7 @@ Usage:
 Examples:
   scripts/build-openwrt.sh --board x86/64
   scripts/build-openwrt.sh --board ipq806x/generic
-  scripts/build-openwrt.sh --board x86/64 --package fluent-bit --package prometheus-node-exporter-lua-compal-ch7465lg --package prometheus-node-exporter-lua-huawei-h153-381
+  scripts/build-openwrt.sh --board x86/64 --package fluent-bit --package prometheus-node-exporter-lua --package prometheus-node-exporter-lua-compal-ch7465lg --package prometheus-node-exporter-lua-huawei-h153-381
 
 Notes:
   - Downloads the prebuilt OpenWrt SDK for the chosen board/version.
@@ -92,16 +92,22 @@ SUBTARGET="${BOARD#*/}"
 
 sdk_filename=""
 arch_default=""
+target_device_symbol=""
 
 # Keep this mapping explicit and pinned: it is the contract the pipeline depends on.
 case "$BOARD" in
   x86/64)
     sdk_filename="openwrt-sdk-${OPENWRT_VERSION}-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
     arch_default="x86_64"
+    target_device_symbol="CONFIG_TARGET_x86_64_DEVICE_generic"
     ;;
   ipq806x/generic)
     sdk_filename="openwrt-sdk-${OPENWRT_VERSION}-ipq806x-generic_gcc-14.3.0_musl_eabi.Linux-x86_64.tar.zst"
     arch_default="arm_cortex-a15_neon-vfpv4"
+    # Package ABI is target/subtarget-wide. Selecting one profile avoids the
+    # SDK default of CONFIG_TARGET_ALL_PROFILES=y, which pulls unrelated
+    # per-device default packages into package builds.
+    target_device_symbol="CONFIG_TARGET_ipq806x_generic_DEVICE_netgear_r7800"
     ;;
   *)
     die "Unsupported board '$BOARD' (supported: x86/64, ipq806x/generic)" ;;
@@ -238,15 +244,64 @@ export TZ=UTC
 # Install requested package definitions. The feeds script resolves dependent package
 # definitions from the updated packages feed as needed; installing entire feeds is
 # unnecessary and very slow.
+# Remove stale feed symlinks from reused SDK workdirs. Earlier package sets may
+# have installed optional package definitions whose Kconfig can break defconfig
+# even when those packages are no longer requested.
+./scripts/feeds uninstall -a || true
+
 ./scripts/feeds install -f -p "${CUSTOM_FEED_NAME}" "${PACKAGE_LIST[@]}"
 
 # Build only the packages requested here. The released SDK config is a buildbot
 # config and may select every target module as =m; invoking broad package
 # targets would then build unrelated kernel modules. Keep .config to the packages
 # we need and invoke each exact feed path.
+# Released SDKs are buildbot SDKs and their Config-build.in can force
+# CONFIG_TARGET_ALL_PROFILES=y plus every per-device profile default. That is
+# useful for official image builders, but it makes package-only builds try to
+# build unrelated target defaults (for example ltq-adsl while building an
+# ipq806x package). Disable only those buildbot/profile defaults in this
+# throwaway SDK workdir before defconfig.
+${PYTHON:-python3} - <<'PY'
+from pathlib import Path
+
+path = Path('Config-build.in')
+if not path.exists():
+    raise SystemExit(0)
+
+exact = {
+    'ALL',
+    'ALL_KMODS',
+    'ALL_NONSHARED',
+    'BUILDBOT',
+    'TARGET_ALL_PROFILES',
+    'TARGET_MULTI_PROFILE',
+    'TARGET_PER_DEVICE_ROOTFS',
+}
+
+current = None
+out = []
+for line in path.read_text().splitlines(keepends=True):
+    stripped = line.strip()
+    if stripped.startswith('config '):
+        current = stripped.split(None, 1)[1]
+    if stripped == 'default y' and (current in exact or (current or '').startswith('TARGET_DEVICE_')):
+        indent = line[:len(line) - len(line.lstrip())]
+        out.append(f'{indent}default n\n')
+    else:
+        out.append(line)
+
+path.write_text(''.join(out))
+PY
+
 {
   printf 'CONFIG_TARGET_%s=y\n' "${TARGET}"
   printf 'CONFIG_TARGET_%s_%s=y\n' "${TARGET}" "${SUBTARGET}"
+  printf '# CONFIG_TARGET_MULTI_PROFILE is not set\n'
+  printf '# CONFIG_TARGET_ALL_PROFILES is not set\n'
+  printf '# CONFIG_TARGET_PER_DEVICE_ROOTFS is not set\n'
+  if [[ -n "${target_device_symbol}" ]]; then
+    printf '%s=y\n' "${target_device_symbol}"
+  fi
   printf '# CONFIG_ALL is not set\n'
   printf '# CONFIG_ALL_KMODS is not set\n'
   printf '# CONFIG_ALL_NONSHARED is not set\n'
