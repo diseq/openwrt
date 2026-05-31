@@ -742,6 +742,17 @@ function Client:get(fun)
   return self:request("POST", "/xml/getter.xml", body)
 end
 
+local function valid_cmstatus_response(xml)
+  if not xml or xml == "" then
+    return false
+  end
+  return xml_text(xml, "dMaxCpes") ~= nil
+      or xml_text(xml, "NumberOfCpes") ~= nil
+      or xml:find("<downstream", 1, true) ~= nil
+      or xml:find("<upstream", 1, true) ~= nil
+      or xml:find("<serviceflow", 1, true) ~= nil
+end
+
 local function emit_downstream(ctx, downstream_xml, signal_xml)
   local channel_label = { "channel_id" }
   for block in xml_blocks(downstream_xml, "downstream") do
@@ -1076,10 +1087,10 @@ function M.collect(opts)
   if ok_client then
     local authenticated = false
     if client:load_session_cache() then
-      local ok_cached = pcall(function()
+      local ok_cached, cached_probe = pcall(function()
         return client:get(FUN.CMSTATUS)
       end)
-      if ok_cached then
+      if ok_cached and valid_cmstatus_response(cached_probe) then
         authenticated = true
         login_logout_success = 1
         debug_log(opts, "using cached Connect Box session")
