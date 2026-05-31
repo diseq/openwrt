@@ -773,6 +773,34 @@ local function resolve_bind_address(interface, target_host)
   return address
 end
 
+local function option_enabled(value, default)
+  if value == nil or value == "" then
+    return default
+  end
+  value = tostring(value):lower()
+  return not (value == "0" or value == "false" or value == "no" or value == "off")
+end
+
+local function cache_escape(value)
+  return (tostring(value or ""):gsub("([^A-Za-z0-9_.~-])", function(c)
+    return "%" .. byte_to_hex(string.byte(c)):upper()
+  end))
+end
+
+local function cache_unescape(value)
+  return (tostring(value or ""):gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16) or 0)
+  end))
+end
+
+local function cache_component(value)
+  return (tostring(value or ""):gsub("[^A-Za-z0-9_.-]", "_"))
+end
+
+local function default_session_cache_path(host, username)
+  return "/tmp/huawei-h153-381-session-" .. cache_component(host) .. "-" .. cache_component(username)
+end
+
 function M.new_client(opts)
   opts = opts or {}
   local ok_http, http = pcall(require, "socket.http")
@@ -791,17 +819,22 @@ function M.new_client(opts)
   local base_url = normalize_url(opts.host)
   local base = parse_base_url(base_url)
   local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base.host)
+  local username = opts.username or DEFAULT_USERNAME
+  local session_cache = option_enabled(opts.session_cache, true)
+  local session_cache_path = non_empty(opts.session_cache_path) or default_session_cache_path(base.host, username)
   return setmetatable({
     base_url = base_url,
     base = base,
     timeout = timeout,
-    username = opts.username or DEFAULT_USERNAME,
+    username = username,
     password = opts.password,
     post_content_type = opts.post_content_type or "application/x-www-form-urlencoded; charset=UTF-8",
     http = http,
     ltn12 = ltn12,
     bind_address = bind_address,
     debug = opts.debug,
+    session_cache = session_cache,
+    session_cache_path = session_cache_path,
     cookies = {},
     tokens = {},
   }, Client)
@@ -816,6 +849,7 @@ local function client_debug(client, message)
     io.stderr:write(tostring(message) .. "\n")
   end
 end
+
 
 
 local function header_value(headers, name)
@@ -877,6 +911,87 @@ function Client:token_header(headers, consume)
   elseif consume and #self.tokens > 1 then
     headers["__RequestVerificationToken"] = table.remove(self.tokens, 1)
   end
+end
+
+function Client:clear_session()
+  self.cookies = {}
+  self.tokens = {}
+end
+
+function Client:load_session_cache()
+  if not self.session_cache or not self.session_cache_path then
+    return false
+  end
+  local f = io.open(self.session_cache_path, "r")
+  if not f then
+    return false
+  end
+  local cookies, tokens = {}, {}
+  local valid = false
+  for line in f:lines() do
+    local kind, a, b = line:match("^([^\t]+)\t([^\t]*)\t?(.*)$")
+    if kind == "host" and cache_unescape(a) ~= self.base.host then
+      f:close()
+      return false
+    elseif kind == "username" and cache_unescape(a) ~= self.username then
+      f:close()
+      return false
+    elseif kind == "cookie" and a ~= "" then
+      cookies[cache_unescape(a)] = cache_unescape(b)
+      valid = true
+    elseif kind == "token" and a ~= "" then
+      tokens[#tokens + 1] = cache_unescape(a)
+      valid = true
+    end
+  end
+  f:close()
+  if not valid then
+    return false
+  end
+  self.cookies = cookies
+  self.tokens = tokens
+  client_debug(self, "loaded cached Huawei session")
+  return true
+end
+
+function Client:save_session_cache()
+  if not self.session_cache or not self.session_cache_path or self.password == nil or self.password == "" then
+    return false
+  end
+  local tmp = self.session_cache_path .. ".tmp"
+  local f = io.open(tmp, "w")
+  if not f then
+    return false
+  end
+  f:write("version\t1\n")
+  f:write("host\t", cache_escape(self.base.host), "\n")
+  f:write("username\t", cache_escape(self.username), "\n")
+  f:write("created\t", tostring(os.time()), "\n")
+  for k, v in pairs(self.cookies) do
+    f:write("cookie\t", cache_escape(k), "\t", cache_escape(v), "\n")
+  end
+  for i = 1, #self.tokens do
+    f:write("token\t", cache_escape(self.tokens[i]), "\n")
+  end
+  f:close()
+  os.execute("chmod 0600 " .. shell_quote(tmp) .. " 2>/dev/null")
+  local ok = os.rename(tmp, self.session_cache_path)
+  if ok then
+    client_debug(self, "saved Huawei session cache")
+  end
+  return ok and true or false
+end
+
+function Client:remove_session_cache()
+  if self.session_cache_path then
+    os.remove(self.session_cache_path)
+  end
+end
+
+function Client:session_authenticated()
+  local state = self:get("user/state-login")
+  local state_map = xml_map(state)
+  return tonumber(state_map.State) == 0
 end
 
 function Client:create_tcp()
@@ -1675,33 +1790,53 @@ function M.collect(opts)
 
   local ok_client, client = pcall(M.new_client, opts)
   if ok_client then
-    local ok_init, init_err = pcall(function() client:initialize() end)
-    if ok_init then
-      local ok_login, login_result = pcall(function() return client:login() end)
-      if ok_login and login_result then
+    local authenticated = false
+    if client:load_session_cache() then
+      local ok_cached, cached_result = pcall(function() return client:session_authenticated() end)
+      if ok_cached and cached_result then
+        authenticated = true
         login_success = 1
-        for i = 1, #endpoints do
-          local item = endpoints[i]
-          local started = now()
-          local ok, body = pcall(function()
-            return client:get(item.endpoint)
-          end)
-          if ok then
-            xmls[item.key] = body
-            scrape_success[item.key] = 1
-            scrape_duration[item.key] = now() - started
-          else
-            debug_log(opts, item.key .. " scrape failed: " .. tostring(body))
-          end
-        end
-        pcall(function() client:logout() end)
-      elseif ok_login then
-        debug_log(opts, "login failed: Huawei API did not return OK")
+        debug_log(opts, "using cached Huawei session")
       else
-        debug_log(opts, "login failed: " .. tostring(login_result))
+        client:clear_session()
+        client:remove_session_cache()
+        debug_log(opts, "cached Huawei session expired")
       end
-    else
-      debug_log(opts, "client initialization failed: " .. tostring(init_err))
+    end
+    if not authenticated then
+      local ok_init, init_err = pcall(function() client:initialize() end)
+      if ok_init then
+        local ok_login, login_result = pcall(function() return client:login() end)
+        if ok_login and login_result then
+          authenticated = true
+          login_success = 1
+          client:save_session_cache()
+        elseif ok_login then
+          debug_log(opts, "login failed: Huawei API did not return OK")
+        else
+          client:remove_session_cache()
+          debug_log(opts, "login failed: " .. tostring(login_result))
+        end
+      else
+        debug_log(opts, "client initialization failed: " .. tostring(init_err))
+      end
+    end
+    if authenticated then
+      for i = 1, #endpoints do
+        local item = endpoints[i]
+        local started = now()
+        local ok, body = pcall(function()
+          return client:get(item.endpoint)
+        end)
+        if ok then
+          xmls[item.key] = body
+          scrape_success[item.key] = 1
+          scrape_duration[item.key] = now() - started
+        else
+          debug_log(opts, item.key .. " scrape failed: " .. tostring(body))
+        end
+      end
+      client:save_session_cache()
     end
   else
     debug_log(opts, "client setup failed: " .. tostring(client))
@@ -1740,6 +1875,7 @@ local function load_uci_config(package_name)
     timeout = cursor:get(package_name, section, "timeout"),
     interface = cursor:get(package_name, section, "interface"),
     collectors = cursor:get(package_name, section, "collectors"),
+    session_cache = cursor:get(package_name, section, "session_cache"),
   }
 end
 
@@ -1763,11 +1899,12 @@ function M.default_options(overrides)
   opts.timeout = opts.timeout or config.timeout or DEFAULT_TIMEOUT
   opts.interface = opts.interface or non_empty(config.interface) or os.getenv("HUAWEI_ROUTER_INTERFACE") or os.getenv("HUAWEI_INTERFACE")
   opts.collectors = non_empty(opts.collectors) or non_empty(config.collectors) or os.getenv("HUAWEI_ROUTER_COLLECTORS") or os.getenv("HUAWEI_COLLECTORS") or "all"
+  opts.session_cache = non_empty(opts.session_cache) or non_empty(config.session_cache) or os.getenv("HUAWEI_ROUTER_SESSION_CACHE") or os.getenv("HUAWEI_SESSION_CACHE") or "1"
   return opts
 end
 
 local function usage(stream)
-  stream:write("Usage: huawei-h153-381-metrics [--host IPv4] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--collectors LIST] [--debug] [--no-config]\n")
+  stream:write("Usage: huawei-h153-381-metrics [--host IPv4] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--collectors LIST] [--no-session-cache] [--debug] [--no-config]\n")
   stream:write("Scrapes Huawei H153-381 router API over direct HTTPS on port 443. HOST must be a bare IPv4 address without scheme or port.\n")
 end
 
@@ -1790,6 +1927,8 @@ function M.parse_args(argv)
       opts.use_config = false
     elseif a == "--debug" then
       opts.debug = true
+    elseif a == "--no-session-cache" then
+      opts.session_cache = "0"
     elseif a == "--host" then
       i = i + 1
       opts.host = require_arg_value(argv, i, a)

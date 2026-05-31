@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fluent-bit
 PKG_VERSION:=5.0.6
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 PKG_SOURCE_URL:=https://github.com/fluent/fluent-bit/archive/refs/tags/
 PKG_SOURCE:=v$(PKG_VERSION).tar.gz
@@ -28,6 +28,8 @@ define Package/fluent-bit/description
 endef
 
 define Package/fluent-bit/conffiles
+/etc/config/fluent-bit
+/etc/fluent-bit/fluent-bit.conf
 /etc/fluent-bit/parsers.conf
 endef
 
@@ -55,7 +57,15 @@ define Package/fluent-bit/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/bin/fluent-bit $(1)/usr/sbin/
 
 	$(INSTALL_DIR) $(1)/etc/fluent-bit
+	$(INSTALL_CONF) ./files/fluent-bit.conf $(1)/etc/fluent-bit/fluent-bit.conf
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/conf/parsers.conf $(1)/etc/fluent-bit/parsers.conf
+
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./files/fluent-bit.config $(1)/etc/config/fluent-bit
+
+	$(INSTALL_DIR) $(1)/etc/init.d
+	$(INSTALL_BIN) ./files/fluent-bit.init $(1)/etc/init.d/fluent-bit
+
 endef
 
 $(eval $(call BuildPackage,fluent-bit))
