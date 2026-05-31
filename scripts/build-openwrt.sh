@@ -10,7 +10,7 @@ REPO_ROOT="$(cd "$script_dir/.." && pwd -P)"
 
 CUSTOM_FEED_NAME="${CUSTOM_FEED_NAME:-fluentbit}"
 CUSTOM_FEED_DIR="${CUSTOM_FEED_DIR:-${REPO_ROOT}/openwrt-feed}"
-OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
+OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
 
 if [[ ! -d "$CUSTOM_FEED_DIR" ]]; then
   echo "error: custom feed dir not found: $CUSTOM_FEED_DIR" >&2
@@ -25,11 +25,11 @@ Usage:
 Examples:
   scripts/build-openwrt.sh --board x86/64
   scripts/build-openwrt.sh --board ipq806x/generic
-  scripts/build-openwrt.sh --board x86/64 --package fluent-bit --package prometheus-node-exporter-lua --package prometheus-node-exporter-lua-compal-ch7465lg --package prometheus-node-exporter-lua-huawei-h153-381
+  scripts/build-openwrt.sh --board x86/64 --package fluent-bit --package prometheus-node-exporter-lua-compal-ch7465lg --package prometheus-node-exporter-lua-huawei-h153-381
 
 Notes:
   - Downloads the prebuilt OpenWrt SDK for the chosen board/version.
-  - Builds selected packages from ./openwrt-feed, overriding same-named OpenWrt feed packages.
+  - Builds selected packages from ./openwrt-feed; dependencies come from the normal OpenWrt feeds.
   - OPENWRT_PACKAGES can also be set to a whitespace-separated package list.
   - Produces a self-contained repository directory under --out.
 EOF
@@ -240,6 +240,26 @@ export TZ=UTC
 # package build even starts. The base feed is still required for core libraries
 # such as openssl, ca-bundle, and related dependency metadata.
 ./scripts/feeds update "${CUSTOM_FEED_NAME}" base packages
+
+# The upstream prometheus-node-exporter-lua Makefile defines many optional
+# collector subpackages in the same file as the core endpoint. The feeds helper
+# installs dependency package definitions for every package defined in that file,
+# not only for the requested core dependency; that pulls unrelated packages such
+# as curl and ltq-adsl into package-only SDK builds. Keep using the upstream core
+# package, but prune optional collector definitions from this throwaway SDK feed
+# checkout before generating the feed index.
+${PYTHON:-python3} - <<'PY'
+from pathlib import Path
+
+path = Path('feeds/packages/utils/prometheus-node-exporter-lua/Makefile')
+if path.exists():
+    text = path.read_text()
+    marker = '# Additional optional exporters:'
+    if marker in text:
+        core = text.split(marker, 1)[0].rstrip()
+        path.write_text(core + '\n\n$(eval $(call BuildPackage,prometheus-node-exporter-lua))\n')
+PY
+./scripts/feeds update -i packages
 
 # Install requested package definitions. The feeds script resolves dependent package
 # definitions from the updated packages feed as needed; installing entire feeds is

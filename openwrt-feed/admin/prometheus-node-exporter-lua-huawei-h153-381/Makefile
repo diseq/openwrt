@@ -16,7 +16,7 @@ define Package/prometheus-node-exporter-lua-huawei-h153-381
   CATEGORY:=Administration
   TITLE:=Huawei H153-381 5G router Prometheus Lua collector
   URL:=https://github.com/Salamek/huawei-lte-api
-  DEPENDS:=prometheus-node-exporter-lua +luasocket +libuci-lua
+  DEPENDS:=+prometheus-node-exporter-lua +luasocket +libuci-lua
 endef
 
 define Package/prometheus-node-exporter-lua-huawei-h153-381/description

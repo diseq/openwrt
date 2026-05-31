@@ -16,7 +16,7 @@ define Package/prometheus-node-exporter-lua-compal-ch7465lg
   CATEGORY:=Administration
   TITLE:=Compal CH7465LG / ConnectBox Prometheus Lua collector
   URL:=https://github.com/mbugert/connectbox-prometheus
-  DEPENDS:=prometheus-node-exporter-lua +luasocket +libuci-lua
+  DEPENDS:=+prometheus-node-exporter-lua +luasocket +libuci-lua
 endef
 
 define Package/prometheus-node-exporter-lua-compal-ch7465lg/description
