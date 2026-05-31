@@ -620,13 +620,20 @@ local Client = {}
 Client.__index = Client
 
 local function normalize_url(host)
-  host = tostring(host or DEFAULT_HOST):gsub("/+$", "")
-  if host:match("^https?://") then
-    return host
+  host = tostring(host or DEFAULT_HOST):match("^%s*(.-)%s*$")
+  if host == "" then
+    host = DEFAULT_HOST
   end
-  local port = host:match(":(%d+)$")
-  if port and port ~= "443" then
-    return "http://" .. host
+  if host:find("://", 1, true) then
+    error("router host must be a bare IPv4 address without scheme; HTTPS port 443 is assumed")
+  end
+  if host:find("/", 1, true) or host:find(":", 1, true) then
+    error("router host must not include a path or port; HTTPS port 443 is assumed")
+  end
+  local a, b, c, d = host:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
+    error("router host must be a bare IPv4 address without scheme; HTTPS port 443 is assumed")
   end
   return "https://" .. host
 end
@@ -785,13 +792,9 @@ function M.new_client(opts)
   local base_url = normalize_url(opts.host)
   local base = parse_base_url(base_url)
   local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base.host)
-  local http_host = non_empty(opts.http_host) or non_empty(opts.host_header) or base.host_header
-  local tls_sni = non_empty(opts.tls_sni) or non_empty(opts.sni) or base.host
   return setmetatable({
     base_url = base_url,
     base = base,
-    http_host = http_host,
-    tls_sni = tls_sni,
     timeout = timeout,
     username = opts.username or DEFAULT_USERNAME,
     password = opts.password,
@@ -933,9 +936,6 @@ function Client:https_request(method, path, body, headers)
   if not conn then
     error("failed to initialize TLS: " .. tostring(wrap_err))
   end
-  if conn.sni then
-    pcall(function() conn:sni(self.tls_sni or self.base.host) end)
-  end
   conn:settimeout(self.timeout)
   local ok_handshake, handshake_err = conn:dohandshake()
   if not ok_handshake then
@@ -944,7 +944,7 @@ function Client:https_request(method, path, body, headers)
 
   local request_headers = {
     method .. " " .. self.base.path .. path .. " HTTP/1.1",
-    "Host: " .. self.http_host,
+    "Host: " .. self.base.host_header,
     "Connection: close",
   }
   for k, v in pairs(headers) do
@@ -1008,9 +1008,7 @@ function Client:request(method, path, body, refresh_csrf)
   if self.base.scheme == "https" then
     ok, code, resp_headers, status, text = self:https_request(method, path, body, headers)
   else
-    if self.http_host then
-      headers.Host = self.http_host
-    end
+    headers.Host = self.base.host_header
     local req = {
       url = self.base_url .. path,
       method = method,
@@ -1678,8 +1676,6 @@ local function load_uci_config(package_name)
     password = cursor:get(package_name, section, "password"),
     timeout = cursor:get(package_name, section, "timeout"),
     interface = cursor:get(package_name, section, "interface"),
-    http_host = cursor:get(package_name, section, "http_host") or cursor:get(package_name, section, "host_header"),
-    tls_sni = cursor:get(package_name, section, "tls_sni"),
     collectors = cursor:get(package_name, section, "collectors"),
   }
 end
@@ -1703,15 +1699,13 @@ function M.default_options(overrides)
   opts.password = opts.password or config.password or os.getenv("HUAWEI_ROUTER_PASS") or os.getenv("HUAWEI_PASSWORD")
   opts.timeout = opts.timeout or config.timeout or DEFAULT_TIMEOUT
   opts.interface = opts.interface or non_empty(config.interface) or os.getenv("HUAWEI_ROUTER_INTERFACE") or os.getenv("HUAWEI_INTERFACE")
-  opts.http_host = non_empty(opts.http_host) or non_empty(opts.host_header) or non_empty(config.http_host) or os.getenv("HUAWEI_ROUTER_HTTP_HOST") or os.getenv("HUAWEI_HTTP_HOST")
-  opts.tls_sni = non_empty(opts.tls_sni) or non_empty(opts.sni) or non_empty(config.tls_sni) or os.getenv("HUAWEI_ROUTER_TLS_SNI") or os.getenv("HUAWEI_TLS_SNI")
   opts.collectors = non_empty(opts.collectors) or non_empty(config.collectors) or os.getenv("HUAWEI_ROUTER_COLLECTORS") or os.getenv("HUAWEI_COLLECTORS") or "all"
   return opts
 end
 
 local function usage(stream)
-  stream:write("Usage: huawei-h153-381-metrics [--host HOST] [--http-host HOST_HEADER] [--tls-sni SNI] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--collectors LIST] [--debug] [--no-config]\n")
-  stream:write("Scrapes Huawei H153-381 router API and writes Prometheus metrics to stdout.\n")
+  stream:write("Usage: huawei-h153-381-metrics [--host IPv4] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--collectors LIST] [--debug] [--no-config]\n")
+  stream:write("Scrapes Huawei H153-381 router API over direct HTTPS on port 443. HOST must be a bare IPv4 address without scheme or port.\n")
 end
 
 local function require_arg_value(argv, index, name)
@@ -1738,20 +1732,6 @@ function M.parse_args(argv)
       opts.host = require_arg_value(argv, i, a)
     elseif a:match("^%-%-host=") then
       opts.host = a:match("^%-%-host=(.*)$")
-    elseif a == "--http-host" or a == "--host-header" then
-      i = i + 1
-      opts.http_host = require_arg_value(argv, i, a)
-    elseif a:match("^%-%-http%-host=") then
-      opts.http_host = a:match("^%-%-http%-host=(.*)$")
-    elseif a:match("^%-%-host%-header=") then
-      opts.http_host = a:match("^%-%-host%-header=(.*)$")
-    elseif a == "--tls-sni" or a == "--sni" then
-      i = i + 1
-      opts.tls_sni = require_arg_value(argv, i, a)
-    elseif a:match("^%-%-tls%-sni=") then
-      opts.tls_sni = a:match("^%-%-tls%-sni=(.*)$")
-    elseif a:match("^%-%-sni=") then
-      opts.tls_sni = a:match("^%-%-sni=(.*)$")
     elseif a == "--username" then
       i = i + 1
       opts.username = require_arg_value(argv, i, a)
@@ -1837,8 +1817,8 @@ function M.reconnect(opts)
 end
 
 local function reconnect_usage(stream)
-  stream:write("Usage: huawei-h153-381-reconnect [--host HOST] [--http-host HOST_HEADER] [--tls-sni SNI] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--debug] [--no-config]\n")
-  stream:write("Authenticates to the Huawei router API and triggers mobile network reconnect via net/reconnect, falling back to mobile data off/on when net/reconnect is unsupported.\n")
+  stream:write("Usage: huawei-h153-381-reconnect [--host IPv4] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--debug] [--no-config]\n")
+  stream:write("Authenticates to the Huawei router API over direct HTTPS on port 443 and triggers mobile network reconnect, falling back to mobile data off/on when net/reconnect is unsupported.\n")
 end
 
 function M.reconnect_main(argv)
