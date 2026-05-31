@@ -624,7 +624,11 @@ local function normalize_url(host)
   if host:match("^https?://") then
     return host
   end
-  return "http://" .. host
+  local port = host:match(":(%d+)$")
+  if port and port ~= "443" then
+    return "http://" .. host
+  end
+  return "https://" .. host
 end
 
 local function parse_base_url(base_url)
