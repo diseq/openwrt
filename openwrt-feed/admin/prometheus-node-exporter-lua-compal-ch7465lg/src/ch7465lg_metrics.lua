@@ -221,14 +221,17 @@ local function shell_quote(s)
   return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
 end
 
-local function command_first_ipv4(command)
+local function command_loose_output(command)
   local f = io.popen(command)
   if not f then
     return nil
   end
   local output = f:read("*a") or ""
   f:close()
-  return output:match("(%d+%.%d+%.%d+%.%d+)")
+  if output == "" then
+    return nil
+  end
+  return output
 end
 local function command_output(command)
   local f = io.popen(command)
@@ -348,8 +351,91 @@ end
 
 M.cbn_encrypt_password = cbn_encrypt_password
 
+local function base_host(host)
+  host = normalize_base_url(host)
+  local hostport = host:match("^https?://([^/]+)") or host
+  hostport = hostport:match("^([^@]+)@(.+)$") or hostport
+  local parsed = hostport:match("^%[([^%]]+)%]")
+  if parsed then
+    return parsed
+  end
+  return hostport:match("^([^:]+)") or hostport
+end
 
-local function resolve_bind_address(interface)
+local function ipv4_to_int(address)
+  local a, b, c, d = tostring(address or ""):match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
+    return nil
+  end
+  return (((a * 256) + b) * 256 + c) * 256 + d
+end
+
+local function same_ipv4_prefix(a, b, prefix)
+  a, b, prefix = ipv4_to_int(a), ipv4_to_int(b), tonumber(prefix)
+  if not a or not b or not prefix or prefix < 0 or prefix > 32 then
+    return false
+  end
+  if prefix == 0 then
+    return true
+  end
+  local divisor = 2 ^ (32 - prefix)
+  return math.floor(a / divisor) == math.floor(b / divisor)
+end
+
+local function is_private_ipv4(address)
+  local a, b = tostring(address or ""):match("^(%d+)%.(%d+)")
+  a, b = tonumber(a), tonumber(b)
+  return a == 10 or (a == 172 and b and b >= 16 and b <= 31) or (a == 192 and b == 168)
+end
+
+local function add_ipv4_candidate(candidates, seen, address, prefix)
+  if address and address:match("^%d+%.%d+%.%d+%.%d+$") and not seen[address] then
+    seen[address] = true
+    candidates[#candidates + 1] = { address = address, prefix = tonumber(prefix) }
+  end
+end
+
+local function collect_ipv4_candidates(output, candidates, seen)
+  if not output then
+    return
+  end
+  for address, prefix in output:gmatch("inet%s+(%d+%.%d+%.%d+%.%d+)/(%d+)") do
+    add_ipv4_candidate(candidates, seen, address, prefix)
+  end
+  for address, prefix in output:gmatch('"address"%s*:%s*"(%d+%.%d+%.%d+%.%d+)".-"mask"%s*:%s*(%d+)') do
+    add_ipv4_candidate(candidates, seen, address, prefix)
+  end
+  for address in output:gmatch("(%d+%.%d+%.%d+%.%d+)") do
+    add_ipv4_candidate(candidates, seen, address, nil)
+  end
+end
+
+local function choose_bind_address(candidates, target_host)
+  local best, best_prefix = nil, -1
+  if target_host and target_host:match("^%d+%.%d+%.%d+%.%d+$") then
+    for i = 1, #candidates do
+      local candidate = candidates[i]
+      local prefix = candidate.prefix or 32
+      if same_ipv4_prefix(candidate.address, target_host, prefix) and prefix > best_prefix then
+        best, best_prefix = candidate.address, prefix
+      end
+    end
+    if best then
+      return best
+    end
+  end
+  for i = 1, #candidates do
+    if is_private_ipv4(candidates[i].address) then
+      return candidates[i].address
+    end
+  end
+  return candidates[1] and candidates[1].address or nil
+end
+
+
+
+local function resolve_bind_address(interface, target_host)
   if interface == nil or interface == "" then
     return nil
   end
@@ -359,7 +445,12 @@ local function resolve_bind_address(interface)
   end
 
   local quoted = shell_quote(interface)
-  local address = command_first_ipv4("ifstatus " .. quoted .. " 2>/dev/null") or command_first_ipv4("ip -o -4 addr show dev " .. quoted .. " 2>/dev/null")
+  local candidates, seen = {}, {}
+  collect_ipv4_candidates(command_loose_output("ifstatus " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_loose_output("ip -o -f inet addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_loose_output("ip -o addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_loose_output("ip addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  local address = choose_bind_address(candidates, target_host)
   if not address then
     error("failed to resolve interface to source IPv4 address: " .. interface)
   end
@@ -381,9 +472,10 @@ function M.new_client(opts)
     error("timeout must be positive")
   end
   http.TIMEOUT = timeout
-  local bind_address = opts.bind_address or resolve_bind_address(opts.interface)
+  local base_url = normalize_base_url(opts.host)
+  local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base_host(base_url))
   return setmetatable({
-    base_url = normalize_base_url(opts.host),
+    base_url = base_url,
     password = opts.password,
     http = http,
     ltn12 = ltn12,

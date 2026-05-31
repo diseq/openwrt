@@ -643,17 +643,91 @@ local function shell_quote(s)
   return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
 end
 
-local function command_first_ipv4(command)
+local function command_output(command)
   local f = io.popen(command)
   if not f then
     return nil
   end
   local output = f:read("*a") or ""
   f:close()
-  return output:match("(%d+%.%d+%.%d+%.%d+)")
+  if output == "" then
+    return nil
+  end
+  return output
 end
 
-local function resolve_bind_address(interface)
+local function ipv4_to_int(address)
+  local a, b, c, d = tostring(address or ""):match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
+  if not a or not b or not c or not d or a > 255 or b > 255 or c > 255 or d > 255 then
+    return nil
+  end
+  return (((a * 256) + b) * 256 + c) * 256 + d
+end
+
+local function same_ipv4_prefix(a, b, prefix)
+  a, b, prefix = ipv4_to_int(a), ipv4_to_int(b), tonumber(prefix)
+  if not a or not b or not prefix or prefix < 0 or prefix > 32 then
+    return false
+  end
+  if prefix == 0 then
+    return true
+  end
+  local divisor = 2 ^ (32 - prefix)
+  return math.floor(a / divisor) == math.floor(b / divisor)
+end
+
+local function is_private_ipv4(address)
+  local a, b = tostring(address or ""):match("^(%d+)%.(%d+)")
+  a, b = tonumber(a), tonumber(b)
+  return a == 10 or (a == 172 and b and b >= 16 and b <= 31) or (a == 192 and b == 168)
+end
+
+local function add_ipv4_candidate(candidates, seen, address, prefix)
+  if address and address:match("^%d+%.%d+%.%d+%.%d+$") and not seen[address] then
+    seen[address] = true
+    candidates[#candidates + 1] = { address = address, prefix = tonumber(prefix) }
+  end
+end
+
+local function collect_ipv4_candidates(output, candidates, seen)
+  if not output then
+    return
+  end
+  for address, prefix in output:gmatch("inet%s+(%d+%.%d+%.%d+%.%d+)/(%d+)") do
+    add_ipv4_candidate(candidates, seen, address, prefix)
+  end
+  for address, prefix in output:gmatch('"address"%s*:%s*"(%d+%.%d+%.%d+%.%d+)".-"mask"%s*:%s*(%d+)') do
+    add_ipv4_candidate(candidates, seen, address, prefix)
+  end
+  for address in output:gmatch("(%d+%.%d+%.%d+%.%d+)") do
+    add_ipv4_candidate(candidates, seen, address, nil)
+  end
+end
+
+local function choose_bind_address(candidates, target_host)
+  local best, best_prefix = nil, -1
+  if target_host and target_host:match("^%d+%.%d+%.%d+%.%d+$") then
+    for i = 1, #candidates do
+      local candidate = candidates[i]
+      local prefix = candidate.prefix or 32
+      if same_ipv4_prefix(candidate.address, target_host, prefix) and prefix > best_prefix then
+        best, best_prefix = candidate.address, prefix
+      end
+    end
+    if best then
+      return best
+    end
+  end
+  for i = 1, #candidates do
+    if is_private_ipv4(candidates[i].address) then
+      return candidates[i].address
+    end
+  end
+  return candidates[1] and candidates[1].address or nil
+end
+
+local function resolve_bind_address(interface, target_host)
   if interface == nil or interface == "" then
     return nil
   end
@@ -663,7 +737,12 @@ local function resolve_bind_address(interface)
   end
 
   local quoted = shell_quote(interface)
-  local address = command_first_ipv4("ifstatus " .. quoted .. " 2>/dev/null") or command_first_ipv4("ip -o -4 addr show dev " .. quoted .. " 2>/dev/null")
+  local candidates, seen = {}, {}
+  collect_ipv4_candidates(command_output("ifstatus " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_output("ip -o -f inet addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_output("ip -o addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  collect_ipv4_candidates(command_output("ip addr show dev " .. quoted .. " 2>/dev/null"), candidates, seen)
+  local address = choose_bind_address(candidates, target_host)
   if not address then
     error("failed to resolve interface to source IPv4 address: " .. interface)
   end
@@ -685,9 +764,9 @@ function M.new_client(opts)
     error("timeout must be positive")
   end
   http.TIMEOUT = timeout
-  local bind_address = opts.bind_address or resolve_bind_address(opts.interface)
   local base_url = normalize_url(opts.host)
   local base = parse_base_url(base_url)
+  local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base.host)
   local http_host = opts.http_host or opts.host_header or base.host_header
   return setmetatable({
     base_url = base_url,
@@ -1674,6 +1753,20 @@ function M.parse_args(argv)
   return opts
 end
 
+local function sleep_seconds(seconds)
+  local ok_socket, socket = pcall(require, "socket")
+  if ok_socket and socket and socket.sleep then
+    socket.sleep(seconds)
+  else
+    os.execute("sleep " .. tostring(tonumber(seconds) or 1))
+  end
+end
+
+local function response_ok(response)
+  local value = xml_text(response, "response")
+  return value == nil or value == "OK"
+end
+
 function M.reconnect(opts)
   opts = opts or {}
   local client = M.new_client(opts)
@@ -1682,23 +1775,38 @@ function M.reconnect(opts)
   if not ok_login then
     error("login failed: Huawei API did not return OK")
   end
+
   local ok_post, response = pcall(function()
     return client:post("net/reconnect", { { "ReconnectAction", 1 } }, false)
   end)
+  if ok_post and response_ok(response) then
+    pcall(function() client:logout() end)
+    return true, "net/reconnect", response
+  end
+
+  debug_log(opts, "net/reconnect failed, falling back to dialup/mobile-dataswitch toggle: " .. tostring(response))
+  local ok_toggle, toggle_err = pcall(function()
+    local off_response = client:post("dialup/mobile-dataswitch", { { "dataswitch", 0 } }, false)
+    if not response_ok(off_response) then
+      error("unexpected mobile data disable response: " .. tostring(xml_text(off_response, "response") or off_response))
+    end
+    sleep_seconds(2)
+    local on_response = client:post("dialup/mobile-dataswitch", { { "dataswitch", 1 } }, false)
+    if not response_ok(on_response) then
+      error("unexpected mobile data enable response: " .. tostring(xml_text(on_response, "response") or on_response))
+    end
+    return on_response
+  end)
   pcall(function() client:logout() end)
-  if not ok_post then
-    error(response)
+  if not ok_toggle then
+    error(toggle_err)
   end
-  local value = xml_text(response, "response")
-  if value and value ~= "OK" then
-    error("unexpected reconnect response: " .. tostring(value))
-  end
-  return true, response
+  return true, "dialup/mobile-dataswitch", toggle_err
 end
 
 local function reconnect_usage(stream)
   stream:write("Usage: huawei-h153-381-reconnect [--host HOST] [--http-host HOST_HEADER] [--tls-sni SNI] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--debug] [--no-config]\n")
-  stream:write("Authenticates to the Huawei router API and triggers mobile network reconnect via net/reconnect.\n")
+  stream:write("Authenticates to the Huawei router API and triggers mobile network reconnect via net/reconnect, falling back to mobile data off/on when net/reconnect is unsupported.\n")
 end
 
 function M.reconnect_main(argv)
@@ -1713,14 +1821,16 @@ function M.reconnect_main(argv)
     return 0
   end
   opts = M.default_options(opts)
+  local method
   local ok, err = pcall(function()
-    M.reconnect(opts)
+    local _, reconnect_method = M.reconnect(opts)
+    method = reconnect_method
   end)
   if not ok then
     io.stderr:write("reconnect failed: " .. tostring(err) .. "\n")
     return 1
   end
-  io.write("Huawei mobile network reconnect requested\n")
+  io.write("Huawei mobile network reconnect requested via " .. tostring(method or "unknown") .. "\n")
   return 0
 end
 
