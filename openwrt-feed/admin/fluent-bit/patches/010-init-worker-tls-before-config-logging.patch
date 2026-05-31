@@ -1,0 +1,39 @@
+From: OpenWrt Fluent Bit package <noreply@example.invalid>
+Subject: [PATCH] config: initialize worker TLS before early logging
+
+On pthread-key TLS builds, flb_log_check() reads flb_worker_ctx through
+pthread_getspecific(). flb_config_init() can log before flb_log_create()
+initializes that key; on musl this faults during startup before argument
+handling such as --help can complete.
+
+Create the key at the start of flb_config_init(). FLB_TLS_INIT() is a no-op
+for compiler TLS builds and pthread_once-protected for pthread-key builds.
+---
+ src/flb_config.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+--- a/src/flb_config.c
++++ b/src/flb_config.c
+@@ -37,6 +37,7 @@
+ #include <fluent-bit/flb_kernel.h>
+ #include <fluent-bit/flb_worker.h>
+ #include <fluent-bit/flb_scheduler.h>
++#include <fluent-bit/flb_thread_storage.h>
+ #include <fluent-bit/flb_http_server.h>
+ #include <fluent-bit/flb_plugin.h>
+ #include <fluent-bit/flb_utils.h>
+@@ -240,6 +241,14 @@ struct flb_config *flb_config_init()
+     struct flb_cf *cf;
+     struct flb_cf_section *section;
+ 
++    /*
++     * Early config setup can log before flb_log_create() installs the worker
++     * context. pthread-key TLS targets must create the key before any
++     * FLB_TLS_GET(flb_worker_ctx), otherwise musl can fault during startup
++     * before even --help completes.
++     */
++    FLB_TLS_INIT(flb_worker_ctx);
++
+     config = flb_calloc(1, sizeof(struct flb_config));
+     if (!config) {
+         flb_errno();

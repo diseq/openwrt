@@ -1,0 +1,41 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OpenWrt build workspaces and output
+.work/
+.work-test/
+dist/
+dist-test/
+out/
+artifact-test/
+site-test/
+site/
+public/
+
+# Crash dumps and logs
+core
+core.*
+*.log
+
+# Local signing keys: keep private keys out of git.
+# Public keys generated for published feeds belong in build output, not source.
+private-key.pem
+public-key.pem
+openwrt-apk-private-key.pem
+fluentbit-public-key.pem
+key-build
+key-build.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

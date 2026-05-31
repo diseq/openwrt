@@ -1,0 +1,15 @@
+[tools]
+python = "3.12"
+uv = "latest"
+
+[settings]
+experimental = true
+
+[tasks.build-x86-64]
+run = "scripts/build-openwrt.sh --board x86/64"
+
+[tasks.build-ipq806x-generic]
+run = "scripts/build-openwrt.sh --board ipq806x/generic"
+
+[tasks.assemble-pages]
+run = "scripts/assemble-pages.sh --in site --out public"

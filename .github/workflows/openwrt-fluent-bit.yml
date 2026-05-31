@@ -1,0 +1,115 @@
+name: openwrt-fluent-bit
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: openwrt-fluent-bit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.board }})
+    runs-on: ubuntu-24.04
+    env:
+      OPENWRT_VERSION: 25.12.3
+      OPENWRT_APK_PRIVATE_KEY_PEM: ${{ secrets.OPENWRT_APK_PRIVATE_KEY_PEM }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: x86/64
+            board_slug: x86-64
+            arch: x86_64
+          - board: ipq806x/generic
+            board_slug: ipq806x-generic
+            arch: arm_cortex-a15_neon-vfpv4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          experimental: true
+
+      - name: install python deps (uv)
+        run: uv sync
+
+
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang flex bison gawk gettext \
+            gcc-multilib g++-multilib \
+            bzip2 ca-certificates cmake file git libelf-dev \
+            libncurses-dev libssl-dev ninja-build patch pkg-config \
+            python3 python3-dev python3-setuptools rsync swig tar time \
+            unzip wget xz-utils zlib1g-dev zstd perl
+
+      - name: require persistent signing key for publishing
+        if: github.ref == 'refs/heads/main' && env.OPENWRT_APK_PRIVATE_KEY_PEM == ''
+        run: |
+          echo 'OPENWRT_APK_PRIVATE_KEY_PEM must be configured before publishing the package feed.' >&2
+          exit 1
+
+      - name: build fluent-bit repo
+        env:
+          OPENWRT_VERSION: ${{ env.OPENWRT_VERSION }}
+          OPENWRT_APK_PRIVATE_KEY_PEM: ${{ env.OPENWRT_APK_PRIVATE_KEY_PEM }}
+        run: |
+          chmod +x scripts/build-openwrt.sh
+          ./scripts/build-openwrt.sh \
+            --board "${{ matrix.board }}" \
+            --openwrt-version "${OPENWRT_VERSION}" \
+            --arch "${{ matrix.arch }}" \
+            --out "${{ github.workspace }}/out/${{ matrix.board_slug }}"
+
+      - name: upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-repo-${{ matrix.board_slug }}
+          path: out/${{ matrix.board_slug }}/
+          if-no-files-found: error
+
+  pages:
+    name: publish GitHub Pages
+    needs: [build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rsync
+
+
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openwrt-repo-*
+          path: site
+          merge-multiple: false
+
+      - name: assemble pages content
+        run: |
+          chmod +x scripts/assemble-pages.sh
+          ./scripts/assemble-pages.sh --in site --out public
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
