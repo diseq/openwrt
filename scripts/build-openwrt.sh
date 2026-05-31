@@ -8,7 +8,7 @@ if [[ "$script_dir" == "$script_path" ]]; then
 fi
 REPO_ROOT="$(cd "$script_dir/.." && pwd -P)"
 
-CUSTOM_FEED_NAME="${CUSTOM_FEED_NAME:-fluentbit}"
+CUSTOM_FEED_NAME="${CUSTOM_FEED_NAME:-custom}"
 CUSTOM_FEED_DIR="${CUSTOM_FEED_DIR:-${REPO_ROOT}/openwrt-feed}"
 OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
 
@@ -235,7 +235,7 @@ fi
 export LC_ALL=C
 export TZ=UTC
 
-# Ensure only the feeds needed for fluent-bit are present. Updating every SDK
+# Ensure only the feeds needed for the custom package set are present. Updating every SDK
 # feed clones luci/routing/telephony/video and can dominate runtime before the
 # package build even starts. The base feed is still required for core libraries
 # such as openssl, ca-bundle, and related dependency metadata.

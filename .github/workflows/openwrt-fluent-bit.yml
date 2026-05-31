@@ -1,4 +1,4 @@
-name: openwrt-fluent-bit
+name: openwrt-packages
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: openwrt-fluent-bit-${{ github.ref }}
+  group: openwrt-packages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
