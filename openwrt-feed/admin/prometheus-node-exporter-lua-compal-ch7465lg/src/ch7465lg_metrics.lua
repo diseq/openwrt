@@ -221,6 +221,41 @@ local function shell_quote(s)
   return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
 end
 
+local function option_enabled(value, default)
+  if value == nil or value == "" then
+    return default and true or false
+  end
+  value = tostring(value):lower()
+  return not (value == "0" or value == "false" or value == "no" or value == "off")
+end
+
+local function non_empty(value)
+  if value == nil or value == "" then
+    return nil
+  end
+  return value
+end
+
+local function cache_escape(value)
+  return (tostring(value or ""):gsub("([^A-Za-z0-9_.~-])", function(c)
+    return string.format("%%%02X", string.byte(c))
+  end))
+end
+
+local function cache_unescape(value)
+  return (tostring(value or ""):gsub("%%(%x%x)", function(hex)
+    return string.char(tonumber(hex, 16) or 0)
+  end))
+end
+
+local function cache_component(value)
+  return (tostring(value or ""):gsub("[^A-Za-z0-9_.-]", "_"))
+end
+
+local function default_session_cache_path(host)
+  return "/tmp/compal-ch7465lg-session-" .. cache_component(host)
+end
+
 local function command_loose_output(command)
   local f = io.popen(command)
   if not f then
@@ -473,7 +508,10 @@ function M.new_client(opts)
   end
   http.TIMEOUT = timeout
   local base_url = normalize_base_url(opts.host)
-  local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base_host(base_url))
+  local host = base_host(base_url)
+  local bind_address = opts.bind_address or resolve_bind_address(opts.interface, host)
+  local session_cache = option_enabled(opts.session_cache, true)
+  local session_cache_path = non_empty(opts.session_cache_path) or default_session_cache_path(host)
   return setmetatable({
     base_url = base_url,
     password = opts.password,
@@ -481,6 +519,8 @@ function M.new_client(opts)
     ltn12 = ltn12,
     bind_address = bind_address,
     password_encryption = opts.password_encryption or "cbn",
+    session_cache = session_cache,
+    session_cache_path = session_cache_path,
     cookies = {},
   }, Client)
 
@@ -511,6 +551,72 @@ function Client:cookie_header()
     parts[#parts + 1] = k .. "=" .. v
   end
   return table.concat(parts, "; ")
+end
+
+function Client:clear_session()
+  self.cookies = {}
+end
+
+function Client:load_session_cache()
+  if not self.session_cache or not self.session_cache_path then
+    return false
+  end
+  local f = io.open(self.session_cache_path, "r")
+  if not f then
+    return false
+  end
+  local cookies = {}
+  local has_sid = false
+  local has_token = false
+  for line in f:lines() do
+    local kind, a, b = line:match("^([^\t]+)\t([^\t]*)\t?(.*)$")
+    if kind == "base_url" and cache_unescape(a) ~= self.base_url then
+      f:close()
+      return false
+    elseif kind == "cookie" and a ~= "" then
+      local name = cache_unescape(a)
+      local value = cache_unescape(b)
+      cookies[name] = value
+      has_sid = has_sid or name == "SID"
+      has_token = has_token or name == "sessionToken" or name == "SessionToken"
+    end
+  end
+  f:close()
+  if not (has_sid and has_token) then
+    return false
+  end
+  self.cookies = cookies
+  return true
+end
+
+function Client:save_session_cache()
+  if not self.session_cache or not self.session_cache_path or self.password == nil or self.password == "" then
+    return false
+  end
+  if not (self.cookies.SID and (self.cookies.sessionToken or self.cookies.SessionToken)) then
+    return false
+  end
+  local tmp = self.session_cache_path .. ".tmp"
+  local f = io.open(tmp, "w")
+  if not f then
+    return false
+  end
+  f:write("version\t1\n")
+  f:write("base_url\t", cache_escape(self.base_url), "\n")
+  f:write("created\t", tostring(os.time()), "\n")
+  for k, v in pairs(self.cookies) do
+    f:write("cookie\t", cache_escape(k), "\t", cache_escape(v), "\n")
+  end
+  f:close()
+  os.execute("chmod 0600 " .. shell_quote(tmp) .. " 2>/dev/null")
+  local ok = os.rename(tmp, self.session_cache_path)
+  return ok and true or false
+end
+
+function Client:remove_session_cache()
+  if self.session_cache_path then
+    os.remove(self.session_cache_path)
+  end
 end
 
 
@@ -968,11 +1074,35 @@ function M.collect(opts)
   local login_logout_success = 0
   local ok_client, client = pcall(M.new_client, opts)
   if ok_client then
-    local ok_login, login_err = pcall(function()
-      client:login()
-    end)
-    if ok_login then
-      login_logout_success = 1
+    local authenticated = false
+    if client:load_session_cache() then
+      local ok_cached = pcall(function()
+        return client:get(FUN.CMSTATUS)
+      end)
+      if ok_cached then
+        authenticated = true
+        login_logout_success = 1
+        debug_log(opts, "using cached Connect Box session")
+      else
+        client:clear_session()
+        client:remove_session_cache()
+        debug_log(opts, "cached Connect Box session expired")
+      end
+    end
+    if not authenticated then
+      local ok_login, login_err = pcall(function()
+        client:login()
+      end)
+      if ok_login then
+        authenticated = true
+        login_logout_success = 1
+        client:save_session_cache()
+      else
+        client:remove_session_cache()
+        debug_log(opts, "login failed: " .. tostring(login_err))
+      end
+    end
+    if authenticated then
       for i = 1, #EXTRACTORS do
         local name = EXTRACTORS[i]
         local started = now()
@@ -984,15 +1114,17 @@ function M.collect(opts)
           debug_log(opts, name .. " scrape failed: " .. tostring(scrape_err))
         end
       end
-      local ok_logout, logout_err = pcall(function()
-        client:logout()
-      end)
-      if not ok_logout then
-        login_logout_success = 0
-        debug_log(opts, "logout failed: " .. tostring(logout_err))
+      if client.session_cache then
+        client:save_session_cache()
+      else
+        local ok_logout, logout_err = pcall(function()
+          client:logout()
+        end)
+        if not ok_logout then
+          login_logout_success = 0
+          debug_log(opts, "logout failed: " .. tostring(logout_err))
+        end
       end
-    else
-      debug_log(opts, "login failed: " .. tostring(login_err))
     end
   else
     debug_log(opts, "client setup failed: " .. tostring(client))
@@ -1028,11 +1160,12 @@ local function load_uci_config(package_name)
   cfg.timeout = cursor:get(package_name, section, "timeout")
   cfg.interface = cursor:get(package_name, section, "interface")
   cfg.password_encryption = cursor:get(package_name, section, "password_encryption")
+  cfg.session_cache = cursor:get(package_name, section, "session_cache")
   return cfg
 end
 
 local function usage(stream)
-  stream:write("Usage: ch7465lg-metrics [--host HOST] [--interface IFACE_OR_SOURCE_IP] [--password PASSWORD] [--password-encryption cbn|plain] [--timeout SECONDS] [--debug] [--no-config]\n")
+  stream:write("Usage: ch7465lg-metrics [--host HOST] [--interface IFACE_OR_SOURCE_IP] [--password PASSWORD] [--password-encryption cbn|plain] [--timeout SECONDS] [--no-session-cache] [--debug] [--no-config]\n")
   stream:write("Scrapes a Compal CH7465LG / ConnectBox and writes Prometheus metrics to stdout.\n")
 end
 
@@ -1052,6 +1185,7 @@ function M.default_options(overrides)
   opts.timeout = opts.timeout or config.timeout or DEFAULT_TIMEOUT
   opts.interface = opts.interface or config.interface or os.getenv("CONNECTBOX_INTERFACE") or os.getenv("MODEM_INTERFACE")
   opts.password_encryption = opts.password_encryption or config.password_encryption or os.getenv("CONNECTBOX_PASSWORD_ENCRYPTION") or os.getenv("MODEM_PASSWORD_ENCRYPTION") or "cbn"
+  opts.session_cache = non_empty(opts.session_cache) or non_empty(config.session_cache) or os.getenv("CONNECTBOX_SESSION_CACHE") or os.getenv("MODEM_SESSION_CACHE") or "1"
   if opts.password_encryption ~= "cbn" and opts.password_encryption ~= "plain" then
     error("password_encryption must be 'cbn' or 'plain'")
   end
@@ -1078,6 +1212,8 @@ function M.parse_args(argv)
       opts.use_config = false
     elseif a == "--debug" then
       opts.debug = true
+    elseif a == "--no-session-cache" then
+      opts.session_cache = "0"
     elseif a == "--host" then
       i = i + 1
       opts.host = require_arg_value(argv, i, a)
