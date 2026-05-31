@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=prometheus-node-exporter-lua-huawei-h153-381
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=11
+PKG_RELEASE:=12
 
 PKG_LICENSE:=MIT
 PKGARCH:=all

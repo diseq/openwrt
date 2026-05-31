@@ -791,6 +791,7 @@ function M.new_client(opts)
     timeout = timeout,
     username = opts.username or DEFAULT_USERNAME,
     password = opts.password,
+    post_content_type = opts.post_content_type or "application/x-www-form-urlencoded; charset=UTF-8",
     http = http,
     ltn12 = ltn12,
     bind_address = bind_address,
@@ -991,7 +992,9 @@ function Client:request(method, path, body, refresh_csrf)
     headers.Cookie = cookie
   end
   if body then
-    headers["Content-Type"] = "application/xml"
+    headers["_ResponseSource"] = "Broswer"
+    headers["Accept"] = "*/*"
+    headers["Content-Type"] = self.post_content_type or "application/x-www-form-urlencoded; charset=UTF-8"
     headers["Content-Length"] = tostring(#body)
     self:token_header(headers, true)
   elseif method == "GET" then
