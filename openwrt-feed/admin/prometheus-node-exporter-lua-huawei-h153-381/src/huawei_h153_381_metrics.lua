@@ -1399,7 +1399,9 @@ local function emit_signal(ctx, data)
     emit_numeric(ctx, spec[1], "gauge", spec[2], data[key])
   end
   for key, value in pairs(data) do
-    emit_unit_metric(ctx, key, value, key)
+    if not SIGNAL_FIELDS[key] then
+      emit_unit_metric(ctx, key, value, key)
+    end
   end
   emit_numeric(ctx, "huawei_metrics_pci", "gauge", "Physical cell ID", data.pci or data.PCI)
   emit_numeric(ctx, "huawei_metrics_nr_pci", "gauge", "5G NR physical cell ID", data.nrpci or data.nr_pci)
