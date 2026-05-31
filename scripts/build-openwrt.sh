@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "$script_dir/.." && pwd -P)"
 
 CUSTOM_FEED_NAME="${CUSTOM_FEED_NAME:-fluentbit}"
 CUSTOM_FEED_DIR="${CUSTOM_FEED_DIR:-${REPO_ROOT}/openwrt-feed}"
+OPENWRT_PACKAGES="${OPENWRT_PACKAGES:-fluent-bit prometheus-node-exporter-lua-compal-ch7465lg prometheus-node-exporter-lua-huawei-h153-381}"
 
 if [[ ! -d "$CUSTOM_FEED_DIR" ]]; then
   echo "error: custom feed dir not found: $CUSTOM_FEED_DIR" >&2
@@ -19,15 +20,17 @@ fi
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/build-openwrt.sh --board <target/subtarget> [--openwrt-version <X.Y.Z>] [--arch <openwrt-arch>] [--out <dir>] [--work <dir>]
+  scripts/build-openwrt.sh --board <target/subtarget> [--openwrt-version <X.Y.Z>] [--arch <openwrt-arch>] [--out <dir>] [--work <dir>] [--package <name>]
 
 Examples:
   scripts/build-openwrt.sh --board x86/64
   scripts/build-openwrt.sh --board ipq806x/generic
+  scripts/build-openwrt.sh --board x86/64 --package fluent-bit --package prometheus-node-exporter-lua-compal-ch7465lg --package prometheus-node-exporter-lua-huawei-h153-381
 
 Notes:
   - Downloads the prebuilt OpenWrt SDK for the chosen board/version.
-  - Builds fluent-bit from ./openwrt-feed, overriding OpenWrt's packages feed.
+  - Builds selected packages from ./openwrt-feed, overriding same-named OpenWrt feed packages.
+  - OPENWRT_PACKAGES can also be set to a whitespace-separated package list.
   - Produces a self-contained repository directory under --out.
 EOF
 }
@@ -48,6 +51,7 @@ BOARD=""
 ARCH=""
 OUT_DIR=""
 WORK_DIR=""
+REQUESTED_PACKAGES=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +65,8 @@ while [[ $# -gt 0 ]]; do
       OUT_DIR="${2:-}"; shift 2 ;;
     --work)
       WORK_DIR="${2:-}"; shift 2 ;;
+    --package)
+      REQUESTED_PACKAGES+=("${2:-}"); shift 2 ;;
     -h|--help)
       usage; exit 0 ;;
     *)
@@ -69,6 +75,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$BOARD" ]] || { usage; die "--board is required"; }
+if [[ ${#REQUESTED_PACKAGES[@]} -gt 0 ]]; then
+  OPENWRT_PACKAGES="${REQUESTED_PACKAGES[*]}"
+fi
+
+read -r -a PACKAGE_LIST <<<"$OPENWRT_PACKAGES"
+[[ ${#PACKAGE_LIST[@]} -gt 0 ]] || die "At least one package must be selected"
+for package_name in "${PACKAGE_LIST[@]}"; do
+  [[ "$package_name" =~ ^[A-Za-z0-9_.+-]+$ ]] || die "Invalid package name: $package_name"
+done
 
 
 TARGET="${BOARD%%/*}"
@@ -220,33 +235,37 @@ export TZ=UTC
 # such as openssl, ca-bundle, and related dependency metadata.
 ./scripts/feeds update "${CUSTOM_FEED_NAME}" base packages
 
-# Install our package definition. The feeds script resolves dependent package
-# definitions from the updated packages feed as needed; installing the entire
-# packages feed is unnecessary and very slow.
-./scripts/feeds install -f -p "${CUSTOM_FEED_NAME}" fluent-bit
+# Install requested package definitions. The feeds script resolves dependent package
+# definitions from the updated packages feed as needed; installing entire feeds is
+# unnecessary and very slow.
+./scripts/feeds install -f -p "${CUSTOM_FEED_NAME}" "${PACKAGE_LIST[@]}"
 
-# Build only the package requested here. The released SDK config is a buildbot
-# config and may select every target module as =m; invoking a broad package
-# target would then build unrelated kernel modules. Keep .config to the package
-# we need and invoke the exact feed path.
-cat > .config <<EOF
-CONFIG_TARGET_${TARGET}=y
-CONFIG_TARGET_${TARGET}_${SUBTARGET}=y
-# CONFIG_ALL is not set
-# CONFIG_ALL_KMODS is not set
-# CONFIG_ALL_NONSHARED is not set
-CONFIG_PACKAGE_fluent-bit=m
-# CONFIG_OPENSSL_ENGINE is not set
-# CONFIG_OPENSSL_WITH_COMPRESSION is not set
-EOF
+# Build only the packages requested here. The released SDK config is a buildbot
+# config and may select every target module as =m; invoking broad package
+# targets would then build unrelated kernel modules. Keep .config to the packages
+# we need and invoke each exact feed path.
+{
+  printf 'CONFIG_TARGET_%s=y\n' "${TARGET}"
+  printf 'CONFIG_TARGET_%s_%s=y\n' "${TARGET}" "${SUBTARGET}"
+  printf '# CONFIG_ALL is not set\n'
+  printf '# CONFIG_ALL_KMODS is not set\n'
+  printf '# CONFIG_ALL_NONSHARED is not set\n'
+  for package_name in "${PACKAGE_LIST[@]}"; do
+    printf 'CONFIG_PACKAGE_%s=m\n' "${package_name}"
+  done
+  printf '# CONFIG_OPENSSL_ENGINE is not set\n'
+  printf '# CONFIG_OPENSSL_WITH_COMPRESSION is not set\n'
+} > .config
 
 make defconfig "${make_args[@]}"
 
-package_path="package/feeds/${CUSTOM_FEED_NAME}/fluent-bit"
-[[ -d "$package_path" ]] || die "Expected installed package path missing: ${package_path}"
+for package_name in "${PACKAGE_LIST[@]}"; do
+  package_path="package/feeds/${CUSTOM_FEED_NAME}/${package_name}"
+  [[ -d "$package_path" ]] || die "Expected installed package path missing: ${package_path}"
 
-make "${package_path}/clean" "${make_args[@]}"
-make "${package_path}/compile" -j"$(nproc)" "${make_args[@]}"
+  make "${package_path}/clean" "${make_args[@]}"
+  make "${package_path}/compile" -j"$(nproc)" "${make_args[@]}"
+done
 
 # Build repository metadata for the produced packages.
 make package/index "${make_args[@]}"

@@ -59,7 +59,7 @@ jobs:
           echo 'OPENWRT_APK_PRIVATE_KEY_PEM must be configured before publishing the package feed.' >&2
           exit 1
 
-      - name: build fluent-bit repo
+      - name: build package repo
         env:
           OPENWRT_VERSION: ${{ env.OPENWRT_VERSION }}
           OPENWRT_APK_PRIVATE_KEY_PEM: ${{ env.OPENWRT_APK_PRIVATE_KEY_PEM }}
