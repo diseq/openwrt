@@ -491,6 +491,37 @@ local function command_output(command)
   return output
 end
 
+local function lua_openssl_pbkdf2_hmac_sha256(password, salt, iterations)
+  local ok, openssl = pcall(require, "openssl")
+  if not ok or not openssl or not openssl.kdf then
+    return nil
+  end
+  local kdf = openssl.kdf
+  if kdf.fetch then
+    local ok_fetch, pbkdf2 = pcall(kdf.fetch, "PBKDF2")
+    if ok_fetch and pbkdf2 and pbkdf2.derive then
+      local ok_derive, key = pcall(function()
+        return pbkdf2:derive({
+          { name = "pass", data = tostring(password or "") },
+          { name = "salt", data = salt },
+          { name = "digest", data = "SHA2-256" },
+          { name = "iter", data = tonumber(iterations) or 0 },
+        }, 32)
+      end)
+      if ok_derive and type(key) == "string" and #key == 32 then
+        return key
+      end
+    end
+  end
+  if kdf.derive then
+    local ok_derive, key = pcall(kdf.derive, tostring(password or ""), salt, "sha256", tonumber(iterations) or 0, 32)
+    if ok_derive and type(key) == "string" and #key == 32 then
+      return key
+    end
+  end
+  return nil
+end
+
 local function openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
   local command = "openssl kdf -keylen 32 -kdfopt digest:SHA256 -kdfopt "
     .. shell_quote_arg("pass:" .. tostring(password or ""))
@@ -516,11 +547,18 @@ local function pbkdf2_hmac_sha256(password, salt, iterations, salt_hex)
   if iterations <= 0 then
     return nil
   end
+  local native = lua_openssl_pbkdf2_hmac_sha256(password, salt, iterations)
+  if native then
+    return native
+  end
   if salt_hex then
     local openssl = openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
     if openssl then
       return openssl
     end
+  end
+  if iterations > 4096 then
+    error("native PBKDF2-HMAC-SHA256 unavailable; install lua-openssl or openssl-util")
   end
   local block = salt .. string.char(0, 0, 0, 1)
   local u = hmac_sha256(password, block)
