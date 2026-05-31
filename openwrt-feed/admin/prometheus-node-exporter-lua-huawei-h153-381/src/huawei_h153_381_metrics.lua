@@ -1023,9 +1023,13 @@ function Client:request(method, path, body, refresh_csrf)
 end
 
 function Client:initialize()
-  local html = self:request("GET", "/", nil, false)
-  for token in html:gmatch('name="csrf_token"%s+content="([^"]+)"') do
-    self.tokens[#self.tokens + 1] = token
+  local ok_html, html = pcall(function()
+    return self:request("GET", "/", nil, false)
+  end)
+  if ok_html then
+    for token in html:gmatch('name="csrf_token"%s+content="([^"]+)"') do
+      self.tokens[#self.tokens + 1] = token
+    end
   end
   if #self.tokens == 0 then
     local ok, body = pcall(function()
