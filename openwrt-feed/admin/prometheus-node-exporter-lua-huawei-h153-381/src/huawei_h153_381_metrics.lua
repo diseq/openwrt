@@ -474,23 +474,6 @@ local function hmac_sha256(key, message)
   return hex_to_bytes(sha256_hex(table.concat(outer) .. inner_hash))
 end
 
-local function shell_quote_arg(s)
-  return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
-end
-
-local function command_output(command)
-  local f = io.popen(command)
-  if not f then
-    return nil
-  end
-  local output = f:read("*a") or ""
-  local ok = f:close()
-  if ok == nil or ok == false then
-    return nil
-  end
-  return output
-end
-
 local function lua_openssl_pbkdf2_hmac_sha256(password, salt, iterations)
   local ok, openssl = pcall(require, "openssl")
   if not ok or not openssl or not openssl.kdf then
@@ -522,25 +505,6 @@ local function lua_openssl_pbkdf2_hmac_sha256(password, salt, iterations)
   return nil
 end
 
-local function openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
-  local command = "openssl kdf -keylen 32 -kdfopt digest:SHA256 -kdfopt "
-    .. shell_quote_arg("pass:" .. tostring(password or ""))
-    .. " -kdfopt " .. shell_quote_arg("hexsalt:" .. tostring(salt_hex or ""))
-    .. " -kdfopt " .. shell_quote_arg("iter:" .. tostring(iterations or ""))
-    .. " PBKDF2"
-  local ok, output = pcall(command_output, command)
-  if not ok then
-    return nil
-  end
-  if not output then
-    return nil
-  end
-  local hex = output:gsub("[^0-9a-fA-F]", ""):lower()
-  if #hex < 64 then
-    return nil
-  end
-  return hex_to_bytes(hex:sub(1, 64))
-end
 
 local function pbkdf2_hmac_sha256(password, salt, iterations, salt_hex)
   iterations = tonumber(iterations) or 0
@@ -551,23 +515,7 @@ local function pbkdf2_hmac_sha256(password, salt, iterations, salt_hex)
   if native then
     return native
   end
-  if salt_hex then
-    local openssl = openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
-    if openssl then
-      return openssl
-    end
-  end
-  if iterations > 4096 then
-    error("native PBKDF2-HMAC-SHA256 unavailable; install lua-openssl or openssl-util")
-  end
-  local block = salt .. string.char(0, 0, 0, 1)
-  local u = hmac_sha256(password, block)
-  local out = u
-  for _ = 2, iterations do
-    u = hmac_sha256(password, u)
-    out = xor_bytes(out, u)
-  end
-  return out
+  error("native PBKDF2-HMAC-SHA256 unavailable; install lua-openssl")
 end
 
 local function random_hex(bytes)
@@ -853,10 +801,22 @@ function M.new_client(opts)
     http = http,
     ltn12 = ltn12,
     bind_address = bind_address,
+    debug = opts.debug,
     cookies = {},
     tokens = {},
   }, Client)
 end
+
+local function client_debug_enabled(client)
+  return client and (client.debug or os.getenv("HUAWEI_DEBUG") == "1" or os.getenv("MODEM_DEBUG") == "1")
+end
+
+local function client_debug(client, message)
+  if client_debug_enabled(client) then
+    io.stderr:write(tostring(message) .. "\n")
+  end
+end
+
 
 local function header_value(headers, name)
   if not headers then
@@ -967,11 +927,81 @@ local function decode_chunked(body)
   end
 end
 
+local function receive_https_line(conn, label)
+  local line, err, partial = conn:receive("*l")
+  line = line or partial
+  if not line then
+    error("HTTPS response " .. label .. " receive failed: " .. tostring(err or "empty response"))
+  end
+  return (line:gsub("\r$", ""))
+end
+
+local function receive_https_exact(conn, length)
+  local out = {}
+  local remaining = tonumber(length) or 0
+  while remaining > 0 do
+    local chunk, err, partial = conn:receive(remaining)
+    chunk = chunk or partial
+    if not chunk or chunk == "" then
+      error("HTTPS response body receive failed: " .. tostring(err or "short read"))
+    end
+    out[#out + 1] = chunk
+    remaining = remaining - #chunk
+  end
+  return table.concat(out)
+end
+
+local function receive_https_chunked(conn)
+  local out = {}
+  while true do
+    local line = receive_https_line(conn, "chunk header")
+    local size_text = line:match("^%s*([^;]+)")
+    local size = tonumber(size_text, 16)
+    if not size then
+      error("invalid HTTPS chunk size: " .. tostring(line))
+    end
+    if size == 0 then
+      repeat
+        line = receive_https_line(conn, "chunk trailer")
+      until line == ""
+      return table.concat(out)
+    end
+    out[#out + 1] = receive_https_exact(conn, size)
+    receive_https_exact(conn, 2)
+  end
+end
+
+local function receive_https_response(conn)
+  local status_line = receive_https_line(conn, "status")
+  local response_headers = {}
+  while true do
+    local line = receive_https_line(conn, "header")
+    if line == "" then
+      break
+    end
+    local key, value = line:match("^([^:]+):%s*(.*)$")
+    if key then
+      append_header(response_headers, key, value)
+    end
+  end
+  local transfer_encoding = header_value(response_headers, "transfer-encoding")
+  local content_length = header_value(response_headers, "content-length")
+  local response_body = ""
+  if transfer_encoding and tostring(transfer_encoding):lower():find("chunked", 1, true) then
+    response_body = receive_https_chunked(conn)
+  elseif content_length then
+    response_body = receive_https_exact(conn, tonumber(content_length) or 0)
+  end
+  local code = tonumber(status_line:match("%s(%d%d%d)%s?"))
+  return code, response_headers, status_line, response_body
+end
+
 function Client:https_request(method, path, body, headers)
   local ok_ssl, ssl = pcall(require, "ssl")
   if not ok_ssl then
     error("missing LuaSec SSL module for HTTPS router URL: " .. tostring(ssl))
   end
+  client_debug(self, method .. " " .. path .. ": connect " .. self.base.host .. ":" .. tostring(self.base.port))
   local tcp = self:create_tcp()
   tcp:settimeout(self.timeout)
   local ok_connect, err = tcp:connect(self.base.host, self.base.port)
@@ -992,6 +1022,7 @@ function Client:https_request(method, path, body, headers)
   if not ok_handshake then
     error("TLS handshake failed: " .. tostring(handshake_err))
   end
+  client_debug(self, method .. " " .. path .. ": TLS ready")
 
   local request_headers = {
     method .. " " .. self.base.path .. path .. " HTTP/1.1",
@@ -1013,29 +1044,10 @@ function Client:https_request(method, path, body, headers)
       error("HTTPS request body send failed: " .. tostring(send_err))
     end
   end
-  local data, recv_err, partial = conn:receive("*a")
+  client_debug(self, method .. " " .. path .. ": waiting for response")
+  local code, response_headers, status_line, response_body = receive_https_response(conn)
   conn:close()
-  data = data or partial or ""
-  if data == "" and recv_err and recv_err ~= "closed" then
-    error("HTTPS response receive failed: " .. tostring(recv_err))
-  end
-  local raw_headers, response_body = data:match("^(.-)\r\n\r\n(.*)$")
-  if not raw_headers then
-    error("invalid HTTPS response")
-  end
-  local status_line = raw_headers:match("^([^\r\n]+)") or ""
-  local code = tonumber(status_line:match("%s(%d%d%d)%s?"))
-  local response_headers = {}
-  for line in raw_headers:gmatch("\r\n([^\r\n]+)") do
-    local key, value = line:match("^([^:]+):%s*(.*)$")
-    if key then
-      append_header(response_headers, key, value)
-    end
-  end
-  local transfer_encoding = header_value(response_headers, "transfer-encoding")
-  if transfer_encoding and tostring(transfer_encoding):lower():find("chunked", 1, true) then
-    response_body = decode_chunked(response_body)
-  end
+  client_debug(self, method .. " " .. path .. ": HTTP " .. tostring(code or "?"))
   return 1, code, response_headers, status_line, response_body
 end
 
