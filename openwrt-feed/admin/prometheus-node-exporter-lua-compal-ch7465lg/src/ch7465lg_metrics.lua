@@ -5,6 +5,7 @@ local DEFAULT_HOST = "192.168.0.1"
 
 local FUN = {
   GLOBALSETTINGS = 1,
+  MULTILANG = 3,
   CM_SYSTEM_INFO = 2,
   DOWNSTREAM_TABLE = 10,
   UPSTREAM_TABLE = 11,
@@ -309,7 +310,10 @@ function Client:create_tcp()
 end
 function Client:request(method, path, body)
   local response = {}
-  local headers = {}
+  local headers = {
+    ["Accept"] = "application/xml, text/xml, */*; q=0.01",
+    ["X-Requested-With"] = "XMLHttpRequest",
+  }
   local cookie = self:cookie_header()
   if cookie ~= "" then
     headers["Cookie"] = cookie
@@ -350,18 +354,32 @@ function Client:get_session_token()
   return token
 end
 
+function Client:prime_session()
+  local paths = { "/", "/index.html", "/common_page/login.html" }
+  for i = 1, #paths do
+    pcall(function()
+      self:request("GET", paths[i])
+    end)
+    if self.cookies.sessionToken or self.cookies.SessionToken then
+      break
+    end
+  end
+  if self.cookies.sessionToken or self.cookies.SessionToken then
+    pcall(function()
+      self:get(FUN.GLOBALSETTINGS)
+    end)
+    pcall(function()
+      self:get(FUN.MULTILANG)
+    end)
+  end
+end
+
 function Client:login()
   if self.password == nil or self.password == "" then
     error("password is required")
   end
 
-  pcall(function()
-    self:request("GET", "/common_page/login.html")
-  end)
-  if not (self.cookies.sessionToken or self.cookies.SessionToken) then
-    self:request("GET", "/")
-  end
-
+  self:prime_session()
   local body = encode_form({
     { "token", self:get_session_token() },
     { "fun", FUN.LOGIN },
@@ -403,12 +421,14 @@ local function emit_downstream(ctx, downstream_xml, signal_xml)
     ctx:metric("connectbox_downstream_snr_db", "gauge", "Downstream channel signal-to-noise ratio (SNR)", channel_label, labels, as_number(xml_text(block, "snr")))
     ctx:metric("connectbox_downstream_rxmer_db", "gauge", "Downstream channel receive modulation error ratio (RxMER)", channel_label, labels, as_number(xml_text(block, "RxMER")))
   end
-  for block in xml_blocks(signal_xml, "signal") do
-    local channel_id = zfill2(xml_text(block, "dsid"))
-    local labels = { channel_id = channel_id }
-    ctx:metric("connectbox_downstream_codewords_unerrored_total", "counter", "Unerrored downstream codewords", channel_label, labels, as_number(xml_text(block, "unerrored")))
-    ctx:metric("connectbox_downstream_codewords_corrected_total", "counter", "Corrected downstream codewords", channel_label, labels, as_number(xml_text(block, "correctable")))
-    ctx:metric("connectbox_downstream_codewords_uncorrectable_total", "counter", "Uncorrectable downstream codewords", channel_label, labels, as_number(xml_text(block, "uncorrectable")))
+  if signal_xml then
+    for block in xml_blocks(signal_xml, "signal") do
+      local channel_id = zfill2(xml_text(block, "dsid"))
+      local labels = { channel_id = channel_id }
+      ctx:metric("connectbox_downstream_codewords_unerrored_total", "counter", "Unerrored downstream codewords", channel_label, labels, as_number(xml_text(block, "unerrored")))
+      ctx:metric("connectbox_downstream_codewords_corrected_total", "counter", "Corrected downstream codewords", channel_label, labels, as_number(xml_text(block, "correctable")))
+      ctx:metric("connectbox_downstream_codewords_uncorrectable_total", "counter", "Uncorrectable downstream codewords", channel_label, labels, as_number(xml_text(block, "uncorrectable")))
+    end
   end
 end
 
@@ -514,10 +534,10 @@ end
 
 function M.emit_from_xmls(xmls)
   local ctx = Context.new()
-  if xmls[FUN.GLOBALSETTINGS] and xmls[FUN.CM_SYSTEM_INFO] and xmls[FUN.CMSTATUS] then
+  if xmls[FUN.GLOBALSETTINGS] and xmls[FUN.CMSTATUS] then
     emit_device(ctx, xmls[FUN.GLOBALSETTINGS], xmls[FUN.CM_SYSTEM_INFO], xmls[FUN.CMSTATUS])
   end
-  if xmls[FUN.DOWNSTREAM_TABLE] and xmls[FUN.SIGNAL_TABLE] then
+  if xmls[FUN.DOWNSTREAM_TABLE] then
     emit_downstream(ctx, xmls[FUN.DOWNSTREAM_TABLE], xmls[FUN.SIGNAL_TABLE])
   end
   if xmls[FUN.UPSTREAM_TABLE] then
@@ -534,10 +554,22 @@ end
 
 local SCRAPERS = {
   device_status = function(ctx, client)
-    emit_device(ctx, client:get(FUN.GLOBALSETTINGS), client:get(FUN.CM_SYSTEM_INFO), client:get(FUN.CMSTATUS))
+    local ok_system, system_xml = pcall(function()
+      return client:get(FUN.CM_SYSTEM_INFO)
+    end)
+    if not ok_system then
+      system_xml = nil
+    end
+    emit_device(ctx, client:get(FUN.GLOBALSETTINGS), system_xml, client:get(FUN.CMSTATUS))
   end,
   downstream = function(ctx, client)
-    emit_downstream(ctx, client:get(FUN.DOWNSTREAM_TABLE), client:get(FUN.SIGNAL_TABLE))
+    local ok_signal, signal_xml = pcall(function()
+      return client:get(FUN.SIGNAL_TABLE)
+    end)
+    if not ok_signal then
+      signal_xml = nil
+    end
+    emit_downstream(ctx, client:get(FUN.DOWNSTREAM_TABLE), signal_xml)
   end,
   upstream = function(ctx, client)
     emit_upstream(ctx, client:get(FUN.UPSTREAM_TABLE))
