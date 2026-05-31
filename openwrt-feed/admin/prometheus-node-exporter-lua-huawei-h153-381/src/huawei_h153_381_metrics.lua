@@ -311,7 +311,7 @@ local SHA256_K = {
 }
 
 local function hex32(x)
-  return string.format("%08x", unsigned(x))
+  return string.format("%08x", math.floor(unsigned(x)))
 end
 
 local function sha256_hex(msg)
