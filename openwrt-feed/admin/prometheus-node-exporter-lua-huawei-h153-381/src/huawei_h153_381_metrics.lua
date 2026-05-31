@@ -135,6 +135,13 @@ local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local function non_empty(value)
+  if value == nil or value == "" then
+    return nil
+  end
+  return value
+end
+
 local function xml_unescape(s)
   if s == nil then
     return nil
@@ -774,12 +781,13 @@ function M.new_client(opts)
   local base_url = normalize_url(opts.host)
   local base = parse_base_url(base_url)
   local bind_address = opts.bind_address or resolve_bind_address(opts.interface, base.host)
-  local http_host = opts.http_host or opts.host_header or base.host_header
+  local http_host = non_empty(opts.http_host) or non_empty(opts.host_header) or base.host_header
+  local tls_sni = non_empty(opts.tls_sni) or non_empty(opts.sni) or base.host
   return setmetatable({
     base_url = base_url,
     base = base,
     http_host = http_host,
-    tls_sni = opts.tls_sni or opts.sni or base.host,
+    tls_sni = tls_sni,
     timeout = timeout,
     username = opts.username or DEFAULT_USERNAME,
     password = opts.password,
@@ -1018,7 +1026,7 @@ function Client:request(method, path, body, refresh_csrf)
   end
   code = tonumber(code)
   if not code or code < 200 or code >= 400 then
-    error(tostring(status or ("HTTP status " .. tostring(code))))
+    error(method .. " " .. path .. ": " .. tostring(status or ("HTTP status " .. tostring(code))))
   end
   self:update_cookies(resp_headers)
   self:update_tokens(resp_headers, refresh_csrf)
@@ -1687,10 +1695,10 @@ function M.default_options(overrides)
   end
   opts.password = opts.password or config.password or os.getenv("HUAWEI_ROUTER_PASS") or os.getenv("HUAWEI_PASSWORD")
   opts.timeout = opts.timeout or config.timeout or DEFAULT_TIMEOUT
-  opts.interface = opts.interface or config.interface or os.getenv("HUAWEI_ROUTER_INTERFACE") or os.getenv("HUAWEI_INTERFACE")
-  opts.http_host = opts.http_host or opts.host_header or config.http_host or os.getenv("HUAWEI_ROUTER_HTTP_HOST") or os.getenv("HUAWEI_HTTP_HOST")
-  opts.tls_sni = opts.tls_sni or opts.sni or config.tls_sni or os.getenv("HUAWEI_ROUTER_TLS_SNI") or os.getenv("HUAWEI_TLS_SNI")
-  opts.collectors = opts.collectors or config.collectors or os.getenv("HUAWEI_ROUTER_COLLECTORS") or os.getenv("HUAWEI_COLLECTORS") or "all"
+  opts.interface = opts.interface or non_empty(config.interface) or os.getenv("HUAWEI_ROUTER_INTERFACE") or os.getenv("HUAWEI_INTERFACE")
+  opts.http_host = non_empty(opts.http_host) or non_empty(opts.host_header) or non_empty(config.http_host) or os.getenv("HUAWEI_ROUTER_HTTP_HOST") or os.getenv("HUAWEI_HTTP_HOST")
+  opts.tls_sni = non_empty(opts.tls_sni) or non_empty(opts.sni) or non_empty(config.tls_sni) or os.getenv("HUAWEI_ROUTER_TLS_SNI") or os.getenv("HUAWEI_TLS_SNI")
+  opts.collectors = non_empty(opts.collectors) or non_empty(config.collectors) or os.getenv("HUAWEI_ROUTER_COLLECTORS") or os.getenv("HUAWEI_COLLECTORS") or "all"
   return opts
 end
 
