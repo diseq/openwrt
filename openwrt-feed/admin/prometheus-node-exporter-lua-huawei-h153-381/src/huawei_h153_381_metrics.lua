@@ -144,6 +144,13 @@ local function xml_unescape(s)
        :gsub("&quot;", '"')
        :gsub("&apos;", "'")
        :gsub("&amp;", "&")
+  s = s:gsub("&#x([0-9a-fA-F]+);", function(n)
+    n = tonumber(n, 16)
+    if n and n >= 0 and n <= 255 then
+      return string.char(n)
+    end
+    return ""
+  end)
   s = s:gsub("&#(%d+);", function(n)
     n = tonumber(n)
     if n and n >= 0 and n <= 255 then
@@ -1032,10 +1039,16 @@ function Client:initialize()
     end
   end
   if #self.tokens == 0 then
+    local token
     local ok, body = pcall(function()
       return self:get("webserver/token")
     end)
-    local token = ok and xml_text(body, "token") or nil
+    if ok then
+      token = xml_text(body, "token")
+      if token and #token > 32 then
+        token = token:sub(33)
+      end
+    end
     if not token then
       ok, body = pcall(function()
         return self:get("webserver/SesTokInfo")
