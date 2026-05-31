@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=prometheus-node-exporter-lua-huawei-h153-381
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=5
 
 PKG_LICENSE:=MIT
 PKGARCH:=all
@@ -16,7 +16,7 @@ define Package/prometheus-node-exporter-lua-huawei-h153-381
   CATEGORY:=Administration
   TITLE:=Huawei H153-381 5G router Prometheus Lua collector
   URL:=https://github.com/Salamek/huawei-lte-api
-  DEPENDS:=+prometheus-node-exporter-lua +luasocket +libuci-lua
+  DEPENDS:=+prometheus-node-exporter-lua +luasocket +luasec +openssl-util +libuci-lua
 endef
 
 define Package/prometheus-node-exporter-lua-huawei-h153-381/description
@@ -32,6 +32,7 @@ endef
 define Package/prometheus-node-exporter-lua-huawei-h153-381/install
 	$(INSTALL_DIR) $(1)/usr/bin
 	$(INSTALL_BIN) ./src/huawei-h153-381-metrics.lua $(1)/usr/bin/huawei-h153-381-metrics
+	$(INSTALL_BIN) ./src/huawei-h153-381-reconnect.lua $(1)/usr/bin/huawei-h153-381-reconnect
 	$(INSTALL_DIR) $(1)/usr/lib/lua
 	$(INSTALL_DATA) ./src/huawei_h153_381_metrics.lua $(1)/usr/lib/lua/huawei_h153_381_metrics.lua
 	$(INSTALL_DIR) $(1)/usr/lib/lua/prometheus-collectors

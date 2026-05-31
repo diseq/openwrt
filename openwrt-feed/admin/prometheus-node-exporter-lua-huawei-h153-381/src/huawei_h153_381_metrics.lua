@@ -13,6 +13,46 @@ local ENDPOINTS = {
   { key = "current_plmn", endpoint = "net/current-plmn" },
   { key = "wlan_hosts", endpoint = "wlan/host-list" },
   { key = "lan_hosts", endpoint = "lan/HostInfo" },
+  { key = "monitoring_converged_status", endpoint = "monitoring/converged-status" },
+  { key = "monitoring_notifications", endpoint = "monitoring/check-notifications" },
+  { key = "monitoring_start_date", endpoint = "monitoring/start_date" },
+  { key = "monitoring_month_statistics", endpoint = "monitoring/month_statistics" },
+  { key = "monitoring_statistic_feature_switch", endpoint = "monitoring/statistic-feature-switch" },
+  { key = "monitoring_onekey_diag", endpoint = "monitoring/onekey_diag" },
+  { key = "device_basic_information", endpoint = "device/basic_information" },
+  { key = "device_feature_switch", endpoint = "device/device-feature-switch" },
+  { key = "device_boot_time", endpoint = "device/boot_time" },
+  { key = "net_net_mode", endpoint = "net/net-mode" },
+  { key = "net_network", endpoint = "net/network" },
+  { key = "net_register", endpoint = "net/register" },
+  { key = "net_net_mode_list", endpoint = "net/net-mode-list" },
+  { key = "net_feature_switch", endpoint = "net/net-feature-switch" },
+  { key = "net_cell_info", endpoint = "net/cell-info" },
+  { key = "net_csps_state", endpoint = "net/csps_state" },
+  { key = "dialup_mobile_dataswitch", endpoint = "dialup/mobile-dataswitch" },
+  { key = "dialup_connection", endpoint = "dialup/connection" },
+  { key = "dialup_feature_switch", endpoint = "dialup/dialup-feature-switch" },
+  { key = "dialup_profiles", endpoint = "dialup/profiles" },
+  { key = "dhcp_settings", endpoint = "dhcp/settings" },
+  { key = "dhcp_feature_switch", endpoint = "dhcp/feature-switch" },
+  { key = "sms_count", endpoint = "sms/sms-count" },
+  { key = "sms_splitinfo", endpoint = "sms/splitinfo-sms" },
+  { key = "sms_feature_switch", endpoint = "sms/sms-feature-switch" },
+  { key = "sms_send_status", endpoint = "sms/send-status" },
+  { key = "pin_status", endpoint = "pin/status" },
+  { key = "pin_simlock", endpoint = "pin/simlock" },
+  { key = "wlan_wifi_feature_switch", endpoint = "wlan/wifi-feature-switch" },
+  { key = "wlan_multi_basic_settings", endpoint = "wlan/multi-basic-settings" },
+  { key = "wlan_multi_switch_settings", endpoint = "wlan/multi-switch-settings" },
+  { key = "wlan_status_switch_settings", endpoint = "wlan/status-switch-settings" },
+  { key = "wlan_guesttime_setting", endpoint = "wlan/guesttime-setting" },
+  { key = "wlan_wps_switch", endpoint = "wlan/wps-switch" },
+  { key = "security_bridgemode", endpoint = "security/bridgemode" },
+  { key = "security_upnp", endpoint = "security/upnp" },
+  { key = "voice_voiperstatus", endpoint = "voice/voiperstatus" },
+  { key = "voice_volte", endpoint = "voice/volte" },
+  { key = "global_module_switch", endpoint = "global/module-switch" },
+  { key = "ntwk_upnp_portmapping", endpoint = "ntwk/lan_upnp_portmapping" },
 }
 
 local NETWORK_TYPES = {
@@ -42,6 +82,43 @@ local NETWORK_TYPES = {
 }
 
 M.ENDPOINTS = ENDPOINTS
+local ENDPOINT_BY_KEY = {}
+for i = 1, #ENDPOINTS do
+  ENDPOINT_BY_KEY[ENDPOINTS[i].key] = ENDPOINTS[i]
+end
+
+local function collector_names()
+  local out = {}
+  for i = 1, #ENDPOINTS do
+    out[i] = ENDPOINTS[i].key
+  end
+  return table.concat(out, " ")
+end
+
+M.COLLECTORS = collector_names()
+
+local function selected_endpoints(collectors)
+  if collectors == nil or collectors == "" then
+    return ENDPOINTS
+  end
+  local selected = {}
+  local seen = {}
+  for name in tostring(collectors):gmatch("[^,%s]+") do
+    if name == "all" then
+      return ENDPOINTS
+    elseif name ~= "none" then
+      local endpoint = ENDPOINT_BY_KEY[name]
+      if not endpoint then
+        error("unknown Huawei collector '" .. name .. "' (valid: all none " .. M.COLLECTORS .. ")")
+      end
+      if not seen[name] then
+        selected[#selected + 1] = endpoint
+        seen[name] = true
+      end
+    end
+  end
+  return selected
+end
 
 local function now()
   local ok, socket = pcall(require, "socket")
@@ -86,12 +163,12 @@ local function xml_text(xml, tag)
     return nil
   end
   local p = tag_pat(tag)
-  return xml_unescape(trim(xml:match("<%s*" .. p .. "[^>]*>(.-)</%s*" .. p .. "%s*>")))
+  return xml_unescape(trim(xml:match("<%s*" .. p .. "%f[%s>/][^>]*>(.-)</%s*" .. p .. "%f[%s>/]%s*>")))
 end
 
 local function xml_blocks(xml, tag)
   local p = tag_pat(tag)
-  return (xml or ""):gmatch("<%s*" .. p .. "[^>]*>(.-)</%s*" .. p .. "%s*>")
+  return (xml or ""):gmatch("<%s*" .. p .. "%f[%s>/][^>]*>(.-)</%s*" .. p .. "%f[%s>/]%s*>")
 end
 
 local function xml_map(xml)
@@ -329,6 +406,135 @@ end
 
 M.encode_password = encode_password
 
+local function hex_to_bytes(hex)
+  return (tostring(hex or ""):gsub("..", function(byte)
+    return string.char(tonumber(byte, 16) or 0)
+  end))
+end
+
+local function bytes_to_hex(bytes)
+  return (tostring(bytes or ""):gsub(".", function(byte)
+    return string.format("%02x", string.byte(byte))
+  end))
+end
+
+local function xor_bytes(a, b)
+  local out = {}
+  local len = math.min(#a, #b)
+  for i = 1, len do
+    out[i] = string.char(bxor(a:byte(i), b:byte(i)) % 256)
+  end
+  return table.concat(out)
+end
+
+local function hmac_sha256(key, message)
+  key = tostring(key or "")
+  message = tostring(message or "")
+  if #key > 64 then
+    key = hex_to_bytes(sha256_hex(key))
+  end
+  if #key < 64 then
+    key = key .. string.rep("\0", 64 - #key)
+  end
+  local inner = {}
+  local outer = {}
+  for i = 1, 64 do
+    local byte = key:byte(i)
+    inner[i] = string.char(bxor(byte, 0x36) % 256)
+    outer[i] = string.char(bxor(byte, 0x5c) % 256)
+  end
+  local inner_hash = hex_to_bytes(sha256_hex(table.concat(inner) .. message))
+  return hex_to_bytes(sha256_hex(table.concat(outer) .. inner_hash))
+end
+
+local function shell_quote_arg(s)
+  return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
+end
+
+local function command_output(command)
+  local f = io.popen(command)
+  if not f then
+    return nil
+  end
+  local output = f:read("*a") or ""
+  local ok = f:close()
+  if ok == nil or ok == false then
+    return nil
+  end
+  return output
+end
+
+local function openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
+  local command = "openssl kdf -keylen 32 -kdfopt digest:SHA256 -kdfopt "
+    .. shell_quote_arg("pass:" .. tostring(password or ""))
+    .. " -kdfopt " .. shell_quote_arg("hexsalt:" .. tostring(salt_hex or ""))
+    .. " -kdfopt " .. shell_quote_arg("iter:" .. tostring(iterations or ""))
+    .. " PBKDF2"
+  local ok, output = pcall(command_output, command)
+  if not ok then
+    return nil
+  end
+  if not output then
+    return nil
+  end
+  local hex = output:gsub("[^0-9a-fA-F]", ""):lower()
+  if #hex < 64 then
+    return nil
+  end
+  return hex_to_bytes(hex:sub(1, 64))
+end
+
+local function pbkdf2_hmac_sha256(password, salt, iterations, salt_hex)
+  iterations = tonumber(iterations) or 0
+  if iterations <= 0 then
+    return nil
+  end
+  if salt_hex then
+    local openssl = openssl_pbkdf2_hmac_sha256(password, salt_hex, iterations)
+    if openssl then
+      return openssl
+    end
+  end
+  local block = salt .. string.char(0, 0, 0, 1)
+  local u = hmac_sha256(password, block)
+  local out = u
+  for _ = 2, iterations do
+    u = hmac_sha256(password, u)
+    out = xor_bytes(out, u)
+  end
+  return out
+end
+
+local function random_hex(bytes)
+  local f = io.open("/dev/urandom", "rb")
+  if f then
+    local data = f:read(bytes)
+    f:close()
+    if data and #data == bytes then
+      return bytes_to_hex(data)
+    end
+  end
+  local out = {}
+  math.randomseed(os.time() + math.floor(now() * 1000000))
+  for i = 1, bytes do
+    out[i] = string.char(math.random(0, 255))
+  end
+  return bytes_to_hex(table.concat(out))
+end
+
+local function scram_client_proof(password, salt_hex, iterations, auth_message)
+  local salted_password = pbkdf2_hmac_sha256(password, hex_to_bytes(salt_hex), iterations, salt_hex)
+  if not salted_password then
+    return nil
+  end
+  local client_key = hmac_sha256("Client Key", salted_password)
+  local stored_key = hex_to_bytes(sha256_hex(client_key))
+  local client_signature = hmac_sha256(auth_message, stored_key)
+  return bytes_to_hex(xor_bytes(client_key, client_signature))
+end
+
+M.scram_client_proof = scram_client_proof
+
 local function prometheus_escape_label(s)
   s = tostring(s or "")
   return s:gsub("\\", "\\\\"):gsub("\n", "\\n"):gsub('"', '\\"')
@@ -407,6 +613,32 @@ local function normalize_url(host)
   return "http://" .. host
 end
 
+local function parse_base_url(base_url)
+  local scheme, rest = tostring(base_url):match("^(https?)://(.+)$")
+  if not scheme then
+    error("unsupported router URL: " .. tostring(base_url))
+  end
+  local hostport, path = rest:match("^([^/]*)(/.*)$")
+  if not hostport then
+    hostport = rest
+    path = ""
+  end
+  local host, port = hostport:match("^%[([^%]]+)%]:(%d+)$")
+  if not host then
+    host, port = hostport:match("^([^:]+):(%d+)$")
+  end
+  if not host then
+    host = hostport:match("^%[([^%]]+)%]$") or hostport
+  end
+  port = tonumber(port) or (scheme == "https" and 443 or 80)
+  local default_port = (scheme == "https" and 443 or 80)
+  local default_host_header = host
+  if port ~= default_port then
+    default_host_header = default_host_header .. ":" .. tostring(port)
+  end
+  return { scheme = scheme, host = host, port = port, path = path, host_header = default_host_header }
+end
+
 local function shell_quote(s)
   return "'" .. tostring(s):gsub("'", [['"'"']]) .. "'"
 end
@@ -454,8 +686,15 @@ function M.new_client(opts)
   end
   http.TIMEOUT = timeout
   local bind_address = opts.bind_address or resolve_bind_address(opts.interface)
+  local base_url = normalize_url(opts.host)
+  local base = parse_base_url(base_url)
+  local http_host = opts.http_host or opts.host_header or base.host_header
   return setmetatable({
-    base_url = normalize_url(opts.host),
+    base_url = base_url,
+    base = base,
+    http_host = http_host,
+    tls_sni = opts.tls_sni or opts.sni or base.host,
+    timeout = timeout,
     username = opts.username or DEFAULT_USERNAME,
     password = opts.password,
     http = http,
@@ -519,10 +758,10 @@ function Client:cookie_header()
   return table.concat(parts, "; ")
 end
 
-function Client:token_header(headers)
+function Client:token_header(headers, consume)
   if #self.tokens == 1 then
     headers["__RequestVerificationToken"] = self.tokens[1]
-  elseif #self.tokens > 1 then
+  elseif consume and #self.tokens > 1 then
     headers["__RequestVerificationToken"] = table.remove(self.tokens, 1)
   end
 end
@@ -542,6 +781,114 @@ function Client:create_tcp()
   return tcp
 end
 
+local function append_header(headers, key, value)
+  local old = headers[key]
+  if old == nil then
+    headers[key] = value
+  elseif type(old) == "table" then
+    old[#old + 1] = value
+  else
+    headers[key] = { old, value }
+  end
+end
+
+local function decode_chunked(body)
+  local out = {}
+  local pos = 1
+  while true do
+    local line_end = body:find("\r\n", pos, true)
+    if not line_end then
+      return body
+    end
+    local size_text = body:sub(pos, line_end - 1):match("^%s*([^;]+)")
+    local size = tonumber(size_text, 16)
+    if not size then
+      return body
+    end
+    pos = line_end + 2
+    if size == 0 then
+      return table.concat(out)
+    end
+    out[#out + 1] = body:sub(pos, pos + size - 1)
+    pos = pos + size + 2
+  end
+end
+
+function Client:https_request(method, path, body, headers)
+  local ok_ssl, ssl = pcall(require, "ssl")
+  if not ok_ssl then
+    error("missing LuaSec SSL module for HTTPS router URL: " .. tostring(ssl))
+  end
+  local tcp = self:create_tcp()
+  tcp:settimeout(self.timeout)
+  local ok_connect, err = tcp:connect(self.base.host, self.base.port)
+  if not ok_connect then
+    error("failed to connect to " .. self.base.host .. ":" .. tostring(self.base.port) .. ": " .. tostring(err))
+  end
+  local conn, wrap_err = ssl.wrap(tcp, {
+    mode = "client",
+    protocol = "any",
+    verify = "none",
+    options = { "all", "no_sslv2", "no_sslv3", "no_tlsv1" },
+  })
+  if not conn then
+    error("failed to initialize TLS: " .. tostring(wrap_err))
+  end
+  if conn.sni then
+    pcall(function() conn:sni(self.tls_sni or self.base.host) end)
+  end
+  conn:settimeout(self.timeout)
+  local ok_handshake, handshake_err = conn:dohandshake()
+  if not ok_handshake then
+    error("TLS handshake failed: " .. tostring(handshake_err))
+  end
+
+  local request_headers = {
+    method .. " " .. self.base.path .. path .. " HTTP/1.1",
+    "Host: " .. self.http_host,
+    "Connection: close",
+  }
+  for k, v in pairs(headers) do
+    request_headers[#request_headers + 1] = tostring(k) .. ": " .. tostring(v)
+  end
+  request_headers[#request_headers + 1] = ""
+  request_headers[#request_headers + 1] = ""
+  local ok_send, send_err = conn:send(table.concat(request_headers, "\r\n"))
+  if not ok_send then
+    error("HTTPS request header send failed: " .. tostring(send_err))
+  end
+  if body and body ~= "" then
+    ok_send, send_err = conn:send(body)
+    if not ok_send then
+      error("HTTPS request body send failed: " .. tostring(send_err))
+    end
+  end
+  local data, recv_err, partial = conn:receive("*a")
+  conn:close()
+  data = data or partial or ""
+  if data == "" and recv_err and recv_err ~= "closed" then
+    error("HTTPS response receive failed: " .. tostring(recv_err))
+  end
+  local raw_headers, response_body = data:match("^(.-)\r\n\r\n(.*)$")
+  if not raw_headers then
+    error("invalid HTTPS response")
+  end
+  local status_line = raw_headers:match("^([^\r\n]+)") or ""
+  local code = tonumber(status_line:match("%s(%d%d%d)%s?"))
+  local response_headers = {}
+  for line in raw_headers:gmatch("\r\n([^\r\n]+)") do
+    local key, value = line:match("^([^:]+):%s*(.*)$")
+    if key then
+      append_header(response_headers, key, value)
+    end
+  end
+  local transfer_encoding = header_value(response_headers, "transfer-encoding")
+  if transfer_encoding and tostring(transfer_encoding):lower():find("chunked", 1, true) then
+    response_body = decode_chunked(response_body)
+  end
+  return 1, code, response_headers, status_line, response_body
+end
+
 function Client:request(method, path, body, refresh_csrf)
   local response = {}
   local headers = {}
@@ -552,25 +899,34 @@ function Client:request(method, path, body, refresh_csrf)
   if body then
     headers["Content-Type"] = "application/xml"
     headers["Content-Length"] = tostring(#body)
-    self:token_header(headers)
+    self:token_header(headers, true)
   elseif method == "GET" then
-    self:token_header(headers)
+    self:token_header(headers, false)
   end
-  local req = {
-    url = self.base_url .. path,
-    method = method,
-    headers = headers,
-    sink = self.ltn12.sink.table(response),
-  }
-  if self.bind_address then
-    req.create = function()
-      return self:create_tcp()
+  local ok, code, resp_headers, status, text
+  if self.base.scheme == "https" then
+    ok, code, resp_headers, status, text = self:https_request(method, path, body, headers)
+  else
+    if self.http_host then
+      headers.Host = self.http_host
     end
+    local req = {
+      url = self.base_url .. path,
+      method = method,
+      headers = headers,
+      sink = self.ltn12.sink.table(response),
+    }
+    if self.bind_address then
+      req.create = function()
+        return self:create_tcp()
+      end
+    end
+    if body then
+      req.source = self.ltn12.source.string(body)
+    end
+    ok, code, resp_headers, status = self.http.request(req)
+    text = table.concat(response)
   end
-  if body then
-    req.source = self.ltn12.source.string(body)
-  end
-  local ok, code, resp_headers, status = self.http.request(req)
   if not ok then
     error(tostring(code or status or "HTTP request failed"))
   end
@@ -580,7 +936,6 @@ function Client:request(method, path, body, refresh_csrf)
   end
   self:update_cookies(resp_headers)
   self:update_tokens(resp_headers, refresh_csrf)
-  local text = table.concat(response)
   local error_code = xml_text(text, "code")
   if text:find("<%s*error[%s>]", 1) and error_code then
     error("Huawei API error " .. error_code .. ": " .. tostring(xml_text(text, "message") or ""))
@@ -628,6 +983,31 @@ function Client:post(endpoint, fields, refresh_csrf)
   return self:request("POST", "/api/" .. endpoint, request_xml(fields), refresh_csrf)
 end
 
+function Client:scram_login()
+  local client_nonce = random_hex(32)
+  local challenge = self:post("user/challenge_login", {
+    { "username", self.username },
+    { "firstnonce", client_nonce },
+    { "mode", 1 },
+  }, false)
+  local salt = xml_text(challenge, "salt")
+  local server_nonce = xml_text(challenge, "servernonce")
+  local iterations = xml_text(challenge, "iterations")
+  if not salt or not server_nonce or not iterations then
+    error("Huawei SCRAM challenge missing salt, server nonce, or iteration count")
+  end
+  local auth_message = client_nonce .. "," .. server_nonce .. "," .. server_nonce
+  local proof = scram_client_proof(self.password, salt, iterations, auth_message)
+  if not proof then
+    error("failed to compute Huawei SCRAM client proof")
+  end
+  local response = self:post("user/authentication_login", {
+    { "clientproof", proof },
+    { "finalnonce", server_nonce },
+  }, true)
+  return response:find("<%s*response[%s>]", 1) ~= nil
+end
+
 function Client:login()
   if self.password == nil or self.password == "" then
     return true
@@ -638,6 +1018,9 @@ function Client:login()
     return true
   end
   local password_type = tonumber(state_map.password_type) or 0
+  if password_type == 4 or tostring(state_map.extern_password_type or "") == "1" then
+    return self:scram_login()
+  end
   local password = encode_password(self.username, self.password, password_type, self.tokens[1])
   local response = self:post("user/login", {
     { "Username", self.username },
@@ -825,6 +1208,130 @@ local function emit_hosts(ctx, prefix, xml)
   return count
 end
 
+local function is_sensitive_field(key)
+  key = tostring(key or ""):lower()
+  return key:find("password", 1, true) or key:find("wpa", 1, true) or key:find("psk", 1, true) or key:find("wep", 1, true) or key:find("key", 1, true)
+end
+
+local function prefixed_metric_name(prefix, key)
+  local suffix = sanitize_metric_part(key)
+  if suffix == "" then
+    return nil
+  end
+  if suffix:find("download", 1, true) or suffix:find("upload", 1, true) or suffix:find("used", 1, true) then
+    if not suffix:find("bytes", 1, true) then
+      suffix = suffix .. "_bytes"
+    end
+  elseif suffix:find("duration", 1, true) or suffix:find("time", 1, true) or suffix:find("lease", 1, true) then
+    if not suffix:find("seconds", 1, true) and key ~= "boot_time" then
+      suffix = suffix .. "_seconds"
+    end
+  end
+  return "huawei_metrics_" .. prefix .. "_" .. suffix
+end
+
+local function emit_numeric_map(ctx, prefix, data, help_prefix)
+  for key, value in pairs(data) do
+    if not is_sensitive_field(key) then
+      local n = as_number(value)
+      local name = n ~= nil and prefixed_metric_name(prefix, key) or nil
+      if name then
+        ctx:metric(name, "gauge", (help_prefix or prefix) .. " " .. key, nil, nil, n)
+      end
+    end
+  end
+end
+
+local function parse_hms_seconds(value)
+  local h, m, s = tostring(value or ""):match("^(%d+):(%d+):(%d+)$")
+  if h then
+    return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+  end
+  return as_number(value)
+end
+
+local function emit_boot_time(ctx, data)
+  local seconds = parse_hms_seconds(data.boot_time or data.BootTime)
+  if seconds then
+    ctx:metric("huawei_metrics_uptime_seconds", "gauge", "Router uptime derived from boot_time", nil, nil, seconds)
+  end
+end
+
+local function emit_basic_info(ctx, data)
+  if data.devicename or data.classify or data.spreadname_en then
+    ctx:metric("huawei_metrics_basic_info", "gauge", "Basic router information", { "device_name", "classify", "spread_name" }, {
+      device_name = data.devicename or "",
+      classify = data.classify or "",
+      spread_name = data.spreadname_en or data.spreadname_zh or "",
+    }, 1)
+  end
+  emit_numeric_map(ctx, "basic", data, "Basic device")
+end
+
+local function emit_network_mode(ctx, data)
+  if data.NetworkMode or data.NetworkBand or data.LTEBand then
+    ctx:metric("huawei_metrics_network_mode_info", "gauge", "Configured network mode and bands", { "network_mode", "network_band", "lte_band" }, {
+      network_mode = data.NetworkMode or "",
+      network_band = data.NetworkBand or "",
+      lte_band = data.LTEBand or "",
+    }, 1)
+  end
+  emit_numeric_map(ctx, "network_mode", data, "Network mode")
+end
+
+local function emit_cell_info(ctx, data)
+  if data.cellinfo or data.lac then
+    ctx:metric("huawei_metrics_cell_info", "gauge", "Serving cell labels", { "cellinfo", "lac" }, {
+      cellinfo = data.cellinfo or "",
+      lac = data.lac or "",
+    }, 1)
+  end
+end
+
+local function emit_dhcp_settings(ctx, data)
+  if data.DhcpIPAddress or data.DhcpStartIPAddress or data.DhcpEndIPAddress then
+    ctx:metric("huawei_metrics_dhcp_pool_info", "gauge", "DHCP pool labels", { "router_ip", "netmask", "start_ip", "end_ip" }, {
+      router_ip = data.DhcpIPAddress or "",
+      netmask = data.DhcpLanNetmask or "",
+      start_ip = data.DhcpStartIPAddress or "",
+      end_ip = data.DhcpEndIPAddress or "",
+    }, 1)
+  end
+  emit_numeric_map(ctx, "dhcp", data, "DHCP")
+end
+
+local function emit_dialup_profiles(ctx, xml)
+  local count = 0
+  for block in xml_blocks(xml, "Profile") do
+    count = count + 1
+    ctx:metric("huawei_metrics_dialup_profile_info", "gauge", "Dial-up profile labels", { "index", "name", "apn", "ip_type", "readonly" }, {
+      index = xml_text(block, "Index") or "",
+      name = xml_text(block, "Name") or "",
+      apn = xml_text(block, "ApnName") or "",
+      ip_type = xml_text(block, "iptype") or "",
+      readonly = xml_text(block, "ReadOnly") or "",
+    }, 1)
+  end
+  ctx:metric("huawei_metrics_dialup_profiles", "gauge", "Number of dial-up profiles", nil, nil, count)
+end
+
+local function emit_wlan_ssids(ctx, xml)
+  local count = 0
+  for block in xml_blocks(xml, "Ssid") do
+    count = count + 1
+    ctx:metric("huawei_metrics_wlan_ssid_info", "gauge", "WLAN SSID labels", { "index", "ssid", "mac", "auth_mode", "guest" }, {
+      index = xml_text(block, "Index") or "",
+      ssid = xml_text(block, "WifiSsid") or "",
+      mac = xml_text(block, "WifiMac") or "",
+      auth_mode = xml_text(block, "WifiAuthmode") or "",
+      guest = xml_text(block, "wifiisguestnetwork") or "",
+    }, 1)
+    ctx:metric("huawei_metrics_wlan_ssid_enabled", "gauge", "WLAN SSID enabled state", { "index" }, { index = xml_text(block, "Index") or "" }, as_number(xml_text(block, "WifiEnable")))
+    ctx:metric("huawei_metrics_wlan_ssid_broadcast", "gauge", "WLAN SSID broadcast state", { "index" }, { index = xml_text(block, "Index") or "" }, as_number(xml_text(block, "WifiBroadcast")))
+  end
+  ctx:metric("huawei_metrics_wlan_ssids", "gauge", "Configured WLAN SSID count", nil, nil, count)
+end
+
 function M.emit_from_xmls(xmls)
   local ctx = Context.new()
   local total_hosts = 0
@@ -843,6 +1350,123 @@ function M.emit_from_xmls(xmls)
   if xmls.current_plmn then
     emit_plmn(ctx, xml_map(xmls.current_plmn))
   end
+  if xmls.monitoring_converged_status then
+    emit_numeric_map(ctx, "converged_status", xml_map(xmls.monitoring_converged_status), "Converged status")
+  end
+  if xmls.monitoring_notifications then
+    emit_numeric_map(ctx, "notifications", xml_map(xmls.monitoring_notifications), "Notification status")
+  end
+  if xmls.monitoring_start_date then
+    emit_numeric_map(ctx, "traffic_limit", xml_map(xmls.monitoring_start_date), "Traffic limit")
+  end
+  if xmls.monitoring_month_statistics then
+    emit_numeric_map(ctx, "month_statistics", xml_map(xmls.monitoring_month_statistics), "Monthly traffic statistics")
+  end
+  if xmls.monitoring_statistic_feature_switch then
+    emit_numeric_map(ctx, "statistic_feature", xml_map(xmls.monitoring_statistic_feature_switch), "Statistic feature")
+  end
+  if xmls.monitoring_onekey_diag then
+    emit_numeric_map(ctx, "diagnostic", xml_map(xmls.monitoring_onekey_diag), "One-key diagnostic")
+  end
+  if xmls.device_basic_information then
+    emit_basic_info(ctx, xml_map(xmls.device_basic_information))
+  end
+  if xmls.device_feature_switch then
+    emit_numeric_map(ctx, "device_feature", xml_map(xmls.device_feature_switch), "Device feature")
+  end
+  if xmls.device_boot_time then
+    emit_boot_time(ctx, xml_map(xmls.device_boot_time))
+  end
+  if xmls.net_net_mode then
+    emit_network_mode(ctx, xml_map(xmls.net_net_mode))
+  end
+  if xmls.net_network then
+    emit_numeric_map(ctx, "network", xml_map(xmls.net_network), "Network")
+  end
+  if xmls.net_register then
+    emit_numeric_map(ctx, "network_register", xml_map(xmls.net_register), "Network registration")
+  end
+  if xmls.net_feature_switch then
+    emit_numeric_map(ctx, "network_feature", xml_map(xmls.net_feature_switch), "Network feature")
+  end
+  if xmls.net_cell_info then
+    emit_cell_info(ctx, xml_map(xmls.net_cell_info))
+  end
+  if xmls.net_csps_state then
+    emit_numeric_map(ctx, "csps", xml_map(xmls.net_csps_state), "CS/PS state")
+  end
+  if xmls.dialup_mobile_dataswitch then
+    emit_numeric_map(ctx, "mobile_data", xml_map(xmls.dialup_mobile_dataswitch), "Mobile data")
+  end
+  if xmls.dialup_connection then
+    emit_numeric_map(ctx, "dialup_connection", xml_map(xmls.dialup_connection), "Dial-up connection")
+  end
+  if xmls.dialup_feature_switch then
+    emit_numeric_map(ctx, "dialup_feature", xml_map(xmls.dialup_feature_switch), "Dial-up feature")
+  end
+  if xmls.dialup_profiles then
+    emit_dialup_profiles(ctx, xmls.dialup_profiles)
+  end
+  if xmls.dhcp_settings then
+    emit_dhcp_settings(ctx, xml_map(xmls.dhcp_settings))
+  end
+  if xmls.dhcp_feature_switch then
+    emit_numeric_map(ctx, "dhcp_feature", xml_map(xmls.dhcp_feature_switch), "DHCP feature")
+  end
+  if xmls.sms_count then
+    emit_numeric_map(ctx, "sms", xml_map(xmls.sms_count), "SMS")
+  end
+  if xmls.sms_splitinfo then
+    emit_numeric_map(ctx, "sms_split", xml_map(xmls.sms_splitinfo), "SMS split")
+  end
+  if xmls.sms_feature_switch then
+    emit_numeric_map(ctx, "sms_feature", xml_map(xmls.sms_feature_switch), "SMS feature")
+  end
+  if xmls.sms_send_status then
+    emit_numeric_map(ctx, "sms_send", xml_map(xmls.sms_send_status), "SMS send")
+  end
+  if xmls.pin_status then
+    emit_numeric_map(ctx, "sim_pin", xml_map(xmls.pin_status), "SIM PIN")
+  end
+  if xmls.pin_simlock then
+    emit_numeric_map(ctx, "simlock", xml_map(xmls.pin_simlock), "SIM lock")
+  end
+  if xmls.wlan_wifi_feature_switch then
+    emit_numeric_map(ctx, "wifi_feature", xml_map(xmls.wlan_wifi_feature_switch), "Wi-Fi feature")
+  end
+  if xmls.wlan_multi_basic_settings then
+    emit_wlan_ssids(ctx, xmls.wlan_multi_basic_settings)
+  end
+  if xmls.wlan_multi_switch_settings then
+    emit_numeric_map(ctx, "wifi_multi", xml_map(xmls.wlan_multi_switch_settings), "Wi-Fi multi-SSID")
+  end
+  if xmls.wlan_status_switch_settings then
+    emit_numeric_map(ctx, "wifi_status", xml_map(xmls.wlan_status_switch_settings), "Wi-Fi status")
+  end
+  if xmls.wlan_guesttime_setting then
+    emit_numeric_map(ctx, "wifi_guest", xml_map(xmls.wlan_guesttime_setting), "Wi-Fi guest")
+  end
+  if xmls.wlan_wps_switch then
+    emit_numeric_map(ctx, "wifi_wps", xml_map(xmls.wlan_wps_switch), "Wi-Fi WPS")
+  end
+  if xmls.security_bridgemode then
+    emit_numeric_map(ctx, "bridge", xml_map(xmls.security_bridgemode), "Bridge mode")
+  end
+  if xmls.security_upnp then
+    emit_numeric_map(ctx, "upnp", xml_map(xmls.security_upnp), "UPnP")
+  end
+  if xmls.voice_voiperstatus then
+    emit_numeric_map(ctx, "voice", xml_map(xmls.voice_voiperstatus), "Voice")
+  end
+  if xmls.voice_volte then
+    emit_numeric_map(ctx, "volte", xml_map(xmls.voice_volte), "VoLTE")
+  end
+  if xmls.global_module_switch then
+    emit_numeric_map(ctx, "module", xml_map(xmls.global_module_switch), "Module switch")
+  end
+  if xmls.ntwk_upnp_portmapping then
+    emit_numeric_map(ctx, "upnp_portmapping", xml_map(xmls.ntwk_upnp_portmapping), "UPnP port mapping")
+  end
   if xmls.wlan_hosts then
     total_hosts = total_hosts + emit_hosts(ctx, "wifi", xmls.wlan_hosts)
   end
@@ -855,37 +1479,60 @@ function M.emit_from_xmls(xmls)
   return table.concat(ctx.lines, "\n") .. "\n"
 end
 
+local function debug_enabled(opts)
+  return opts and (opts.debug or os.getenv("HUAWEI_DEBUG") == "1" or os.getenv("MODEM_DEBUG") == "1")
+end
+
+local function debug_log(opts, message)
+  if debug_enabled(opts) then
+    io.stderr:write(tostring(message) .. "\n")
+  end
+end
+
 function M.collect(opts)
   opts = opts or {}
   local ctx = Context.new()
+  local endpoints = selected_endpoints(opts.collectors)
   local scrape_success = {}
   local scrape_duration = {}
-  for i = 1, #ENDPOINTS do
-    scrape_success[ENDPOINTS[i].key] = 0
+  for i = 1, #endpoints do
+    scrape_success[endpoints[i].key] = 0
   end
   local login_success = 0
   local xmls = {}
 
   local ok_client, client = pcall(M.new_client, opts)
   if ok_client then
-    local ok_init = pcall(function() client:initialize() end)
-    local ok_login = ok_init and pcall(function() return client:login() end)
-    if ok_login then
-      login_success = 1
-      for i = 1, #ENDPOINTS do
-        local item = ENDPOINTS[i]
-        local started = now()
-        local ok, body = pcall(function()
-          return client:get(item.endpoint)
-        end)
-        if ok then
-          xmls[item.key] = body
-          scrape_success[item.key] = 1
-          scrape_duration[item.key] = now() - started
+    local ok_init, init_err = pcall(function() client:initialize() end)
+    if ok_init then
+      local ok_login, login_result = pcall(function() return client:login() end)
+      if ok_login and login_result then
+        login_success = 1
+        for i = 1, #endpoints do
+          local item = endpoints[i]
+          local started = now()
+          local ok, body = pcall(function()
+            return client:get(item.endpoint)
+          end)
+          if ok then
+            xmls[item.key] = body
+            scrape_success[item.key] = 1
+            scrape_duration[item.key] = now() - started
+          else
+            debug_log(opts, item.key .. " scrape failed: " .. tostring(body))
+          end
         end
+        pcall(function() client:logout() end)
+      elseif ok_login then
+        debug_log(opts, "login failed: Huawei API did not return OK")
+      else
+        debug_log(opts, "login failed: " .. tostring(login_result))
       end
-      pcall(function() client:logout() end)
+    else
+      debug_log(opts, "client initialization failed: " .. tostring(init_err))
     end
+  else
+    debug_log(opts, "client setup failed: " .. tostring(client))
   end
 
   local metrics = M.emit_from_xmls(xmls)
@@ -893,14 +1540,14 @@ function M.collect(opts)
     ctx.lines[#ctx.lines + 1] = metrics:gsub("\n$", "")
   end
   local label = { "collector" }
-  for i = 1, #ENDPOINTS do
-    local key = ENDPOINTS[i].key
+  for i = 1, #endpoints do
+    local key = endpoints[i].key
     if scrape_duration[key] then
       ctx:metric("huawei_metrics_scrape_duration_seconds", "gauge", "Scrape duration by collector", label, { collector = key }, scrape_duration[key])
     end
   end
-  for i = 1, #ENDPOINTS do
-    local key = ENDPOINTS[i].key
+  for i = 1, #endpoints do
+    local key = endpoints[i].key
     ctx:metric("huawei_metrics_up", "gauge", "Huawei metrics scrape success by collector", label, { collector = key }, scrape_success[key])
   end
   ctx:metric("huawei_metrics_up", "gauge", "Huawei metrics scrape success by collector", label, { collector = "login" }, login_success)
@@ -920,6 +1567,9 @@ local function load_uci_config(package_name)
     password = cursor:get(package_name, section, "password"),
     timeout = cursor:get(package_name, section, "timeout"),
     interface = cursor:get(package_name, section, "interface"),
+    http_host = cursor:get(package_name, section, "http_host") or cursor:get(package_name, section, "host_header"),
+    tls_sni = cursor:get(package_name, section, "tls_sni"),
+    collectors = cursor:get(package_name, section, "collectors"),
   }
 end
 
@@ -936,14 +1586,20 @@ function M.default_options(overrides)
   end
   opts.host = opts.host or config.host or DEFAULT_HOST
   opts.username = opts.username or config.username or DEFAULT_USERNAME
+  if opts.username == "" then
+    opts.username = DEFAULT_USERNAME
+  end
   opts.password = opts.password or config.password or os.getenv("HUAWEI_ROUTER_PASS") or os.getenv("HUAWEI_PASSWORD")
   opts.timeout = opts.timeout or config.timeout or DEFAULT_TIMEOUT
   opts.interface = opts.interface or config.interface or os.getenv("HUAWEI_ROUTER_INTERFACE") or os.getenv("HUAWEI_INTERFACE")
+  opts.http_host = opts.http_host or opts.host_header or config.http_host or os.getenv("HUAWEI_ROUTER_HTTP_HOST") or os.getenv("HUAWEI_HTTP_HOST")
+  opts.tls_sni = opts.tls_sni or opts.sni or config.tls_sni or os.getenv("HUAWEI_ROUTER_TLS_SNI") or os.getenv("HUAWEI_TLS_SNI")
+  opts.collectors = opts.collectors or config.collectors or os.getenv("HUAWEI_ROUTER_COLLECTORS") or os.getenv("HUAWEI_COLLECTORS") or "all"
   return opts
 end
 
 local function usage(stream)
-  stream:write("Usage: huawei-h153-381-metrics [--host HOST] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--no-config]\n")
+  stream:write("Usage: huawei-h153-381-metrics [--host HOST] [--http-host HOST_HEADER] [--tls-sni SNI] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--collectors LIST] [--debug] [--no-config]\n")
   stream:write("Scrapes Huawei H153-381 router API and writes Prometheus metrics to stdout.\n")
 end
 
@@ -964,11 +1620,27 @@ function M.parse_args(argv)
       opts.help = true
     elseif a == "--no-config" then
       opts.use_config = false
+    elseif a == "--debug" then
+      opts.debug = true
     elseif a == "--host" then
       i = i + 1
       opts.host = require_arg_value(argv, i, a)
     elseif a:match("^%-%-host=") then
       opts.host = a:match("^%-%-host=(.*)$")
+    elseif a == "--http-host" or a == "--host-header" then
+      i = i + 1
+      opts.http_host = require_arg_value(argv, i, a)
+    elseif a:match("^%-%-http%-host=") then
+      opts.http_host = a:match("^%-%-http%-host=(.*)$")
+    elseif a:match("^%-%-host%-header=") then
+      opts.http_host = a:match("^%-%-host%-header=(.*)$")
+    elseif a == "--tls-sni" or a == "--sni" then
+      i = i + 1
+      opts.tls_sni = require_arg_value(argv, i, a)
+    elseif a:match("^%-%-tls%-sni=") then
+      opts.tls_sni = a:match("^%-%-tls%-sni=(.*)$")
+    elseif a:match("^%-%-sni=") then
+      opts.tls_sni = a:match("^%-%-sni=(.*)$")
     elseif a == "--username" then
       i = i + 1
       opts.username = require_arg_value(argv, i, a)
@@ -989,12 +1661,67 @@ function M.parse_args(argv)
       opts.timeout = require_arg_value(argv, i, a)
     elseif a:match("^%-%-timeout=") then
       opts.timeout = a:match("^%-%-timeout=(.*)$")
+    elseif a == "--collectors" then
+      i = i + 1
+      opts.collectors = require_arg_value(argv, i, a)
+    elseif a:match("^%-%-collectors=") then
+      opts.collectors = a:match("^%-%-collectors=(.*)$")
     else
       error("unknown argument: " .. tostring(a))
     end
     i = i + 1
   end
   return opts
+end
+
+function M.reconnect(opts)
+  opts = opts or {}
+  local client = M.new_client(opts)
+  client:initialize()
+  local ok_login = client:login()
+  if not ok_login then
+    error("login failed: Huawei API did not return OK")
+  end
+  local ok_post, response = pcall(function()
+    return client:post("net/reconnect", { { "ReconnectAction", 1 } }, false)
+  end)
+  pcall(function() client:logout() end)
+  if not ok_post then
+    error(response)
+  end
+  local value = xml_text(response, "response")
+  if value and value ~= "OK" then
+    error("unexpected reconnect response: " .. tostring(value))
+  end
+  return true, response
+end
+
+local function reconnect_usage(stream)
+  stream:write("Usage: huawei-h153-381-reconnect [--host HOST] [--http-host HOST_HEADER] [--tls-sni SNI] [--interface IFACE_OR_SOURCE_IP] [--username USER] [--password PASSWORD] [--timeout SECONDS] [--debug] [--no-config]\n")
+  stream:write("Authenticates to the Huawei router API and triggers mobile network reconnect via net/reconnect.\n")
+end
+
+function M.reconnect_main(argv)
+  local ok_args, opts = pcall(M.parse_args, argv or {})
+  if not ok_args then
+    io.stderr:write(tostring(opts) .. "\n")
+    reconnect_usage(io.stderr)
+    return 2
+  end
+  if opts.help then
+    reconnect_usage(io.stdout)
+    return 0
+  end
+  opts = M.default_options(opts)
+  local ok, err = pcall(function()
+    M.reconnect(opts)
+  end)
+  if not ok then
+    io.stderr:write("reconnect failed: " .. tostring(err) .. "\n")
+    return 1
+  end
+  io.write("Huawei mobile network reconnect requested\n")
+  return 0
 end
 
 function M.main(argv)
